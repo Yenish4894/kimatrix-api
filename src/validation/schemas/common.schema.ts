@@ -1,0 +1,73 @@
+import Joi from "joi";
+
+const E164_PATTERN = /^\+[1-9]\d{1,14}$/;
+const PASSWORD_PATTERN = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).+$/;
+
+export const commonPatterns = {
+  uuid: Joi.string().uuid({ version: "uuidv4" }),
+  email: Joi.string().trim().lowercase().email().max(255),
+  username: Joi.string()
+    .trim()
+    .min(3)
+    .max(64)
+    .pattern(/^[a-zA-Z0-9_.-]+$/)
+    .message("Username may only contain letters, digits, dot, underscore, or hyphen."),
+  password: Joi.string()
+    .min(8)
+    .max(128)
+    .pattern(PASSWORD_PATTERN)
+    .message(
+      "Password must be at least 8 characters and include one lowercase letter, one uppercase letter, and one number.",
+    ),
+  phoneE164: Joi.string()
+    .trim()
+    .pattern(E164_PATTERN)
+    .message("Please enter a valid phone number in international format, e.g. +22712345678."),
+  name: Joi.string().trim().min(2).max(255),
+  positiveInt: Joi.number().integer().positive(),
+  shortText: Joi.string().trim().max(255),
+  longText: Joi.string().trim().max(2048),
+};
+
+export const addressFields = {
+  streetAddress: Joi.string().trim().min(3).max(512).messages({
+    "string.empty": "Street address is required.",
+    "string.min": "Street address must be at least 3 characters.",
+    "string.max": "Street address must be 512 characters or fewer.",
+    "any.required": "Street address is required.",
+  }),
+  city: Joi.string().trim().min(2).max(128).messages({
+    "string.empty": "City is required.",
+    "string.min": "City must be at least 2 characters.",
+    "string.max": "City must be 128 characters or fewer.",
+    "any.required": "City is required.",
+  }),
+  state: Joi.string().trim().min(2).max(128).messages({
+    "string.empty": "State or region is required.",
+    "string.min": "State or region must be at least 2 characters.",
+    "string.max": "State or region must be 128 characters or fewer.",
+    "any.required": "State or region is required.",
+  }),
+  country: Joi.string().trim().min(2).max(128).messages({
+    "string.empty": "Country is required.",
+    "string.min": "Country must be at least 2 characters.",
+    "string.max": "Country must be 128 characters or fewer.",
+    "any.required": "Country is required.",
+  }),
+  postalCode: Joi.string().trim().min(1).max(32).allow(null, "").messages({
+    "string.min": "Postal code must be at least 1 character.",
+    "string.max": "Postal code must be 32 characters or fewer.",
+  }),
+};
+
+export const idParamsSchema = Joi.object({
+  id: commonPatterns.uuid.required(),
+})
+  .strict()
+  .required();
+
+export const paginationSchema = Joi.object({
+  page: commonPatterns.positiveInt.default(1),
+  limit: commonPatterns.positiveInt.max(100).default(10),
+  search: Joi.string().trim().max(255).allow(""),
+});

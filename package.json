@@ -1,0 +1,80 @@
+{
+  "name": "sena-temp-backend",
+  "version": "0.1.0",
+  "description": "sena-temp backend — B2B SaaS for QR-based customer purchase tracking",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc && tsc-alias && tsc-esm-fix --target=dist",
+    "start": "NODE_ENV=production node dist/src/server.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint \"src/**/*.ts\" \"migrations/**/*.ts\"",
+    "lint:fix": "eslint --fix \"src/**/*.ts\" \"migrations/**/*.ts\"",
+    "format": "prettier --write \"src/**/*.ts\" \"migrations/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"migrations/**/*.ts\"",
+    "prepare": "husky",
+    "seed:superadmin": "tsx scripts/create-superadmin.ts",
+    "migration:generate": "npm run build && npx tsx ./node_modules/typeorm/cli.js -d dist/data-source.js migration:generate",
+    "migration:run": "npm run build && npx tsx ./node_modules/typeorm/cli.js -d dist/data-source.js migration:run",
+    "migration:revert": "npm run build && npx tsx ./node_modules/typeorm/cli.js -d dist/data-source.js migration:revert",
+    "migration:show": "npx tsx ./node_modules/typeorm/cli.js -d data-source.ts migration:show",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@sendgrid/mail": "^8.1.6",
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.66.5",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^7.1.0",
+    "ioredis": "^5.7.0",
+    "joi": "^17.12.0",
+    "jsonwebtoken": "^9.0.2",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^8.0.7",
+    "pg": "^8.11.3",
+    "pino": "^9.5.0",
+    "pino-http": "^10.3.0",
+    "rate-limit-redis": "^4.2.0",
+    "reflect-metadata": "^0.2.2",
+    "typeorm": "^0.3.20",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.14.0",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/node": "^22.5.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^8.0.0",
+    "@types/uuid": "^10.0.0",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^9.1.0",
+    "globals": "^15.11.0",
+    "husky": "^9.1.6",
+    "lint-staged": "^15.5.2",
+    "pino-pretty": "^11.3.0",
+    "prettier": "^3.8.3",
+    "tsc-alias": "^1.8.10",
+    "tsc-esm-fix": "^3.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.13.0"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yaml,yml}": [
+      "prettier --write"
+    ]
+  }
+}
