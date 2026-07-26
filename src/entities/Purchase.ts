@@ -1,4 +1,4 @@
-import { Entity, Column, ManyToOne, JoinColumn, Index, Unique } from "typeorm";
+import { Entity, Column, ManyToOne, JoinColumn, Index, Unique, type Relation } from "typeorm";
 import { BaseEntity } from "./BaseEntity";
 import { Company } from "./Company";
 import { Customer } from "./Customer";
@@ -13,14 +13,14 @@ export class Purchase extends BaseEntity {
     onDelete: "RESTRICT",
   })
   @JoinColumn({ name: "company_id" })
-  company!: Company;
+  company!: Relation<Company>;
 
   @ManyToOne(() => Customer, (customer) => customer.purchases, {
     nullable: false,
     onDelete: "RESTRICT",
   })
   @JoinColumn({ name: "customer_id" })
-  customer!: Customer;
+  customer!: Relation<Customer>;
 
   @Column({ name: "invoice_number", type: "varchar", length: 64 })
   invoiceNumber!: string;

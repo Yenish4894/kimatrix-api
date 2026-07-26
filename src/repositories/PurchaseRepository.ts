@@ -90,16 +90,6 @@ export class PurchaseRepository {
     return { items, total };
   }
 
-  async exportByCompany(companyId: string, manager?: EntityManager): Promise<Purchase[]> {
-    return this.getRepo(manager)
-      .createQueryBuilder("p")
-      .leftJoinAndSelect("p.customer", "cu")
-      .where("p.company_id = :companyId", { companyId })
-      .orderBy("p.submittedAt", "DESC")
-      .addOrderBy("p.id", "ASC")
-      .getMany();
-  }
-
   async create(data: Partial<Purchase>, manager?: EntityManager): Promise<Purchase> {
     const repo = this.getRepo(manager);
     return repo.save(repo.create(data));

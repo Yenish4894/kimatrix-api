@@ -1,7 +1,7 @@
 import Joi from "joi";
 
 const E164_PATTERN = /^\+[1-9]\d{1,14}$/;
-const PASSWORD_PATTERN = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).+$/;
+const PASSWORD_PATTERN = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).+$/;
 
 export const commonPatterns = {
   uuid: Joi.string().uuid({ version: "uuidv4" }),
@@ -14,10 +14,10 @@ export const commonPatterns = {
     .message("Username may only contain letters, digits, dot, underscore, or hyphen."),
   password: Joi.string()
     .min(8)
-    .max(128)
+    .max(18)
     .pattern(PASSWORD_PATTERN)
     .message(
-      "Password must be at least 8 characters and include one lowercase letter, one uppercase letter, and one number.",
+      "Password must be 8–18 characters and include one lowercase letter, one uppercase letter, one number, and one special character.",
     ),
   phoneE164: Joi.string()
     .trim()

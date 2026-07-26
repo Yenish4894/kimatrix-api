@@ -34,7 +34,6 @@ router.get(
   validateRequest(listCustomersQuerySchema, ValidationTarget.QUERY),
   controller.listCustomers,
 );
-router.get("/customers/export", requireActiveSubscription, controller.exportCustomers);
 router.get(
   "/customers/:customerId",
   requireActiveSubscription,
@@ -48,7 +47,6 @@ router.get(
   validateRequest(listPurchasesQuerySchema, ValidationTarget.QUERY),
   controller.listPurchases,
 );
-router.get("/purchases/export", requireActiveSubscription, controller.exportPurchases);
 router.get(
   "/purchases/:purchaseId",
   requireActiveSubscription,

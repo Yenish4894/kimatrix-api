@@ -1,5 +1,5 @@
 # ============================================
-# KIMatrix Backend - .gitignore
+# KIMates Backend - .gitignore
 # Node.js + TypeScript + PostgreSQL + Redis
 # ============================================
 
@@ -232,6 +232,18 @@ isolatescope-*.json
 
 # ─── Husky Git Hooks ────────────────────────
 .husky/_/
+
+# ─── AI / Dev Tooling ───────────────────────
+CLAUDE.md
+AGENTS.md
+GIT_SETUP_SUMMARY.md
+SETUP.md
+FRONTEND_API_GUIDE.md
+FRONTEND_FLOWS.md
+PAYPAL_WEBHOOK_SETUP.md
+verify-security.sh
+verify-security.ps1
+.claude/
 
 # ─── Misc ───────────────────────────────────
 # Backup files

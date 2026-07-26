@@ -1,4 +1,14 @@
-import { Entity, Column, OneToOne, ManyToOne, JoinColumn, OneToMany, Index, Check } from "typeorm";
+import {
+  Entity,
+  Column,
+  OneToOne,
+  ManyToOne,
+  JoinColumn,
+  OneToMany,
+  Index,
+  Check,
+  type Relation,
+} from "typeorm";
 import { BaseEntity } from "./BaseEntity";
 import { User } from "./User";
 import { Customer } from "./Customer";
@@ -17,7 +27,7 @@ export class Company extends BaseEntity {
     onDelete: "RESTRICT",
   })
   @JoinColumn({ name: "owner_user_id" })
-  owner!: User;
+  owner!: Relation<User>;
 
   @Column({ type: "varchar", length: 255 })
   name!: string;
@@ -79,21 +89,21 @@ export class Company extends BaseEntity {
 
   @ManyToOne(() => User, { nullable: true, onDelete: "SET NULL" })
   @JoinColumn({ name: "deactivated_by_user_id" })
-  deactivatedBy!: User | null;
+  deactivatedBy!: Relation<User> | null;
 
   @ManyToOne(() => Plan, { nullable: true, onDelete: "SET NULL" })
   @JoinColumn({ name: "current_plan_id" })
-  currentPlan!: Plan | null;
+  currentPlan!: Relation<Plan> | null;
 
   @Column({ name: "subscription_expires_at", type: "timestamptz", nullable: true })
   subscriptionExpiresAt!: Date | null;
 
   @OneToMany(() => Customer, (customer) => customer.company)
-  customers!: Customer[];
+  customers!: Relation<Customer[]>;
 
   @OneToMany(() => Purchase, (purchase) => purchase.company)
-  purchases!: Purchase[];
+  purchases!: Relation<Purchase[]>;
 
   @OneToMany(() => Payment, (payment) => payment.company)
-  payments!: Payment[];
+  payments!: Relation<Payment[]>;
 }

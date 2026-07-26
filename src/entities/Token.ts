@@ -1,4 +1,4 @@
-import { Entity, Column, ManyToOne, JoinColumn, Index } from "typeorm";
+import { Entity, Column, ManyToOne, JoinColumn, Index, type Relation } from "typeorm";
 import { BaseEntity } from "./BaseEntity";
 import { User } from "./User";
 
@@ -16,7 +16,7 @@ export class Token extends BaseEntity {
     onDelete: "CASCADE",
   })
   @JoinColumn({ name: "user_id" })
-  user!: User;
+  user!: Relation<User>;
 
   @Column({ type: "varchar", length: 32 })
   type!: TokenType;

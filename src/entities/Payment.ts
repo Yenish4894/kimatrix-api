@@ -1,4 +1,4 @@
-import { Entity, Column, ManyToOne, JoinColumn, Index } from "typeorm";
+import { Entity, Column, ManyToOne, JoinColumn, Index, type Relation } from "typeorm";
 import { BaseEntity } from "./BaseEntity";
 import { Company } from "./Company";
 import { Plan } from "./Plan";
@@ -10,11 +10,11 @@ export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 export class Payment extends BaseEntity {
   @ManyToOne(() => Company, { nullable: false, onDelete: "RESTRICT" })
   @JoinColumn({ name: "company_id" })
-  company!: Company;
+  company!: Relation<Company>;
 
   @ManyToOne(() => Plan, (plan) => plan.payments, { nullable: false, onDelete: "RESTRICT" })
   @JoinColumn({ name: "plan_id" })
-  plan!: Plan;
+  plan!: Relation<Plan>;
 
   @Index({ unique: true })
   @Column({ name: "paypal_order_id", type: "varchar", length: 64 })

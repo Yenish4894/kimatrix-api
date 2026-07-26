@@ -22,8 +22,7 @@ export class AuthController extends BaseController {
       });
       return {
         data: result,
-        message:
-          "Thank you for registering. Once your payment is verified, your account will be activated and you'll be able to log in.",
+        message: "Registration successful.",
         statusCode: 201,
       };
     });

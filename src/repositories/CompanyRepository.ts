@@ -41,6 +41,7 @@ export class CompanyRepository {
   async findByOwnerUserId(ownerUserId: string, manager?: EntityManager): Promise<Company | null> {
     return this.getRepo(manager)
       .createQueryBuilder("c")
+      .leftJoinAndSelect("c.currentPlan", "currentPlan")
       .where("c.owner_user_id = :ownerUserId", { ownerUserId })
       .getOne();
   }

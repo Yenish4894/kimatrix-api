@@ -59,6 +59,9 @@ export interface RegisterCompanyResult {
     | "joinedAt"
     | "qrToken"
   >;
+  companyId: string;
+  companyIsActive: boolean;
+  tokens: IssuedTokens;
 }
 
 export interface RefreshResult {
@@ -78,18 +81,11 @@ export class AuthService {
 
   async registerCompany(
     input: RegisterCompanyInput,
-    _context: RegisterCompanyContext,
+    context: RegisterCompanyContext,
     outerManager?: EntityManager,
   ): Promise<RegisterCompanyResult> {
     const email = input.email.trim().toLowerCase();
     const username = input.username.trim();
-
-    const compromised = await this.passwordService.isCompromised(input.password);
-    if (compromised) {
-      throw BadRequestError(
-        "This password has appeared in a known data breach. Please choose a different password.",
-      );
-    }
 
     const passwordHash = await this.passwordService.hash(input.password);
 
@@ -137,6 +133,10 @@ export class AuthService {
         "Company registered (pending activation)",
       );
 
+      // Auto-login: issue a session so the user can immediately start the
+      // subscription payment in the same flow (no separate manual login step).
+      const tokens = await this.tokenService.issueTokens(user, company.id, context, manager);
+
       return {
         user: {
           id: user.id,
@@ -163,6 +163,9 @@ export class AuthService {
           joinedAt: company.joinedAt,
           qrToken: company.qrToken,
         },
+        companyId: company.id,
+        companyIsActive: company.isActive,
+        tokens,
       };
     };
 
@@ -364,13 +367,6 @@ export class AuthService {
       throw BadRequestError("Current password is incorrect");
     }
 
-    const compromised = await this.passwordService.isCompromised(input.newPassword);
-    if (compromised) {
-      throw BadRequestError(
-        "This password has appeared in a known data breach. Please choose a different password.",
-      );
-    }
-
     const newHash = await this.passwordService.hash(input.newPassword);
 
     await AppDataSource.transaction(async (manager) => {
@@ -382,13 +378,6 @@ export class AuthService {
   }
 
   async confirmPasswordReset(input: PasswordResetConfirmInput): Promise<void> {
-    const compromised = await this.passwordService.isCompromised(input.newPassword);
-    if (compromised) {
-      throw BadRequestError(
-        "This password has appeared in a known data breach. Please choose a different password.",
-      );
-    }
-
     const tokenHash = this.tokenService.hashToken(input.token);
 
     await AppDataSource.transaction(async (manager) => {

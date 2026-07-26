@@ -47,10 +47,13 @@ export class PaymentRepository {
     orderId: string,
     manager: EntityManager,
   ): Promise<Payment | null> {
+    // Lock ONLY the payments row (`FOR UPDATE OF p`). Postgres rejects `FOR UPDATE`
+    // on the nullable side of a LEFT JOIN, so we must scope the lock to "p" while
+    // still eager-loading company + plan for the capture logic.
     return manager
       .getRepository(Payment)
       .createQueryBuilder("p")
-      .setLock("pessimistic_write")
+      .setLock("pessimistic_write", undefined, ["p"])
       .leftJoinAndSelect("p.company", "company")
       .leftJoinAndSelect("p.plan", "plan")
       .where("p.paypalOrderId = :orderId", { orderId })

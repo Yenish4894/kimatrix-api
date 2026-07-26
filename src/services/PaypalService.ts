@@ -1,9 +1,45 @@
 import { config } from "@/config/index";
 import { logger } from "@/utils/logger";
+import { AppError, BadRequestError } from "@/errors/index";
 
 interface PaypalTokenResponse {
   access_token: string;
   expires_in: number;
+}
+
+interface PaypalErrorBody {
+  name?: string;
+  message?: string;
+  details?: { issue?: string; description?: string }[];
+}
+
+const PAYMENT_PROVIDER_ERROR = "PAYMENT_PROVIDER_ERROR";
+
+// Buyer-actionable capture issues → surface a clear, friendly 400 so the user
+// knows what to do. Anything else is treated as an upstream provider failure (502),
+// never a generic 500.
+const CAPTURE_ISSUE_MESSAGES: Record<string, string> = {
+  INSTRUMENT_DECLINED: "Your payment method was declined by PayPal. Please try a different one.",
+  PAYER_CANNOT_PAY:
+    "This PayPal account can't complete the payment. Please use a different method.",
+  PAYER_ACCOUNT_RESTRICTED: "Your PayPal account is restricted and can't complete this payment.",
+  TRANSACTION_REFUSED:
+    "PayPal refused the transaction. Please try again or use a different method.",
+  ORDER_NOT_APPROVED:
+    "This payment hasn't been approved on PayPal yet. Please complete the PayPal approval and try again.",
+  ORDER_ALREADY_CAPTURED: "This payment has already been completed.",
+};
+
+async function parsePaypalError(
+  res: Response,
+): Promise<{ name: string | undefined; issue: string | undefined; raw: string }> {
+  const raw = await res.text();
+  try {
+    const body = JSON.parse(raw) as PaypalErrorBody;
+    return { name: body.name, issue: body.details?.[0]?.issue, raw };
+  } catch {
+    return { name: undefined, issue: undefined, raw };
+  }
 }
 
 export interface PaypalOrderResult {
@@ -65,9 +101,13 @@ export class PaypalService {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      logger.error({ status: res.status, body }, "PayPal token fetch failed");
-      throw new Error("Failed to obtain PayPal access token");
+      const { raw } = await parsePaypalError(res);
+      logger.error({ status: res.status, body: raw }, "PayPal token fetch failed");
+      throw new AppError(
+        "The payment service is temporarily unavailable. Please try again shortly.",
+        502,
+        PAYMENT_PROVIDER_ERROR,
+      );
     }
 
     const data = (await res.json()) as PaypalTokenResponse;
@@ -114,9 +154,18 @@ export class PaypalService {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      logger.error({ status: res.status, body }, "PayPal create-order failed");
-      throw new Error("Failed to create PayPal order");
+      const { name, issue, raw } = await parsePaypalError(res);
+      logger.error({ status: res.status, name, issue, body: raw }, "PayPal create-order failed");
+      if (issue === "CURRENCY_NOT_SUPPORTED") {
+        throw BadRequestError(
+          "This plan's currency is not supported by PayPal. Please contact support.",
+        );
+      }
+      throw new AppError(
+        "Payment could not be initiated right now. Please try again shortly.",
+        502,
+        PAYMENT_PROVIDER_ERROR,
+      );
     }
 
     return (await res.json()) as PaypalOrderResult;
@@ -134,9 +183,18 @@ export class PaypalService {
     });
 
     if (!res.ok) {
-      const body = await res.text();
-      logger.error({ status: res.status, body, orderId }, "PayPal capture failed");
-      throw new Error("Failed to capture PayPal order");
+      const { name, issue, raw } = await parsePaypalError(res);
+      logger.error(
+        { status: res.status, name, issue, body: raw, orderId },
+        "PayPal capture failed",
+      );
+      const friendly = issue ? CAPTURE_ISSUE_MESSAGES[issue] : undefined;
+      if (friendly) throw BadRequestError(friendly);
+      throw new AppError(
+        "We couldn't complete your PayPal payment. Please try again.",
+        502,
+        PAYMENT_PROVIDER_ERROR,
+      );
     }
 
     return (await res.json()) as PaypalCaptureResult;
@@ -150,6 +208,17 @@ export class PaypalService {
     transmissionSig: string;
     rawBody: string;
   }): Promise<boolean> {
+    // Without a configured webhook ID we cannot verify the signature. Fail
+    // loudly with a distinct message so this is never confused with a genuine
+    // verification failure (e.g. a spoofed/replayed event).
+    if (!config.PAYPAL_WEBHOOK_ID) {
+      logger.error(
+        "PAYPAL_WEBHOOK_ID is not set — PayPal webhook events cannot be verified and will be ignored. " +
+          "Create a webhook in the PayPal dashboard and set PAYPAL_WEBHOOK_ID.",
+      );
+      return false;
+    }
+
     const token = await this.getAccessToken();
 
     const res = await fetchWithTimeout(

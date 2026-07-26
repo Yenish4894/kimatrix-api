@@ -1,4 +1,4 @@
-import { Entity, Column, OneToMany } from "typeorm";
+import { Entity, Column, OneToMany, type Relation } from "typeorm";
 import { BaseEntity } from "./BaseEntity";
 import { Payment } from "./Payment";
 
@@ -20,5 +20,5 @@ export class Plan extends BaseEntity {
   isActive!: boolean;
 
   @OneToMany(() => Payment, (payment) => payment.plan)
-  payments!: Payment[];
+  payments!: Relation<Payment[]>;
 }

@@ -1,4 +1,4 @@
-import { Entity, Column, OneToOne, OneToMany, Check } from "typeorm";
+import { Entity, Column, OneToOne, OneToMany, Check, type Relation } from "typeorm";
 import { BaseEntity } from "./BaseEntity";
 import { Company } from "./Company";
 import { Token } from "./Token";
@@ -34,8 +34,8 @@ export class User extends BaseEntity {
   passwordChangedAt!: Date | null;
 
   @OneToOne(() => Company, (company) => company.owner)
-  company!: Company | null;
+  company!: Relation<Company> | null;
 
   @OneToMany(() => Token, (token) => token.user)
-  tokens!: Token[];
+  tokens!: Relation<Token[]>;
 }

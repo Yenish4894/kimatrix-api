@@ -9,14 +9,12 @@ import { logger } from "@/utils/logger";
 interface Args {
   email: string;
   password: string;
-  skipHibp: boolean;
 }
 
 function parseArgs(): Args {
   const args = process.argv.slice(2);
   let email: string | undefined;
   let password: string | undefined;
-  let skipHibp = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -24,38 +22,25 @@ function parseArgs(): Args {
       email = args[++i];
     } else if (arg === "--password") {
       password = args[++i];
-    } else if (arg === "--skip-hibp") {
-      skipHibp = true;
     }
   }
 
   if (!email || !password) {
-    console.error(
-      "Usage: tsx scripts/create-superadmin.ts --email <email> --password <password> [--skip-hibp]",
-    );
+    console.error("Usage: tsx scripts/create-superadmin.ts --email <email> --password <password>");
     process.exit(1);
   }
 
-  return { email, password, skipHibp };
+  return { email, password };
 }
 
 async function main(): Promise<void> {
-  const { email: rawEmail, password, skipHibp } = parseArgs();
+  const { email: rawEmail, password } = parseArgs();
   const email = rawEmail.trim().toLowerCase();
 
   validateConfig();
   await initializeDatabase();
 
   const passwordService = new PasswordService();
-
-  if (!skipHibp) {
-    const compromised = await passwordService.isCompromised(password);
-    if (compromised) {
-      logger.error("Password appears in a known data breach. Refusing to create super admin.");
-      await closeDatabase();
-      process.exit(2);
-    }
-  }
 
   const userRepo = AppDataSource.getRepository(User);
 

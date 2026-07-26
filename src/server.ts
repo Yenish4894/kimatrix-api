@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import "dotenv/config";
 import app from "@/app";
-import { config, validateConfig } from "@/config/index";
+import { config, validateConfig, isProduction } from "@/config/index";
 import { initializeDatabase, closeDatabase } from "data-source";
 import { getRedisClient, closeRedis } from "@/config/redis.client";
 import { closeEmailQueue } from "@/queues/email.queue";
@@ -9,8 +9,34 @@ import { startEmailWorker, stopEmailWorker } from "@/workers/email.worker";
 import { startTokenCleanupCron, stopTokenCleanupCron } from "@/cron/tokenCleanup.cron";
 import { logger } from "@/utils/logger";
 
+function warnIfPaymentsMisconfigured(): void {
+  if (!isProduction) return;
+  const missing = (
+    [
+      ["PAYPAL_CLIENT_ID", config.PAYPAL_CLIENT_ID],
+      ["PAYPAL_CLIENT_SECRET", config.PAYPAL_CLIENT_SECRET],
+      ["PAYPAL_WEBHOOK_ID", config.PAYPAL_WEBHOOK_ID],
+    ] as const
+  )
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
+
+  if (missing.length > 0) {
+    logger.warn(
+      { missing, paypalMode: config.PAYPAL_MODE },
+      "PayPal is not fully configured — payment capture and/or webhook activation will not work until these are set",
+    );
+  } else if (config.PAYPAL_MODE !== "live") {
+    logger.warn(
+      { paypalMode: config.PAYPAL_MODE },
+      "PAYPAL_MODE is not 'live' in production — payments will use the PayPal sandbox",
+    );
+  }
+}
+
 async function start(): Promise<void> {
   validateConfig();
+  warnIfPaymentsMisconfigured();
   await initializeDatabase();
   getRedisClient();
   startEmailWorker();

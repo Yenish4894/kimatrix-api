@@ -81,30 +81,4 @@ export class CompanyController extends BaseController {
       return { data: purchase };
     });
   };
-
-  exportCustomers = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const company = req.company;
-      if (!company) throw UnauthorizedError("Company context missing");
-      const csv = await this.companyService.exportCustomersCsv(company.id);
-      res.setHeader("Content-Type", "text/csv");
-      res.setHeader("Content-Disposition", 'attachment; filename="customers.csv"');
-      res.status(200).send(csv);
-    } catch (err) {
-      next(err);
-    }
-  };
-
-  exportPurchases = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const company = req.company;
-      if (!company) throw UnauthorizedError("Company context missing");
-      const csv = await this.companyService.exportPurchasesCsv(company.id);
-      res.setHeader("Content-Type", "text/csv");
-      res.setHeader("Content-Disposition", 'attachment; filename="purchases.csv"');
-      res.status(200).send(csv);
-    } catch (err) {
-      next(err);
-    }
-  };
 }

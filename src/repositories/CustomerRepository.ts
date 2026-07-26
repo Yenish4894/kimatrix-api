@@ -117,15 +117,6 @@ export class CustomerRepository {
       .getOne();
   }
 
-  async exportByCompany(companyId: string, manager?: EntityManager): Promise<Customer[]> {
-    return this.getRepo(manager)
-      .createQueryBuilder("c")
-      .where("c.company_id = :companyId", { companyId })
-      .orderBy("c.totalInvoiceAmount", "DESC")
-      .addOrderBy("c.id", "ASC")
-      .getMany();
-  }
-
   async getCompanyStats(companyId: string, manager?: EntityManager): Promise<CompanyCustomerStats> {
     const repo = this.getRepo(manager);
 

@@ -32,6 +32,14 @@ export interface CompanyProfile {
   joinedAt: Date;
   qrToken: string;
   qrUrl: string;
+  subscriptionExpiresAt: Date | null;
+  currentPlan: {
+    id: string;
+    name: string;
+    durationDays: number;
+    price: string;
+    currency: string;
+  } | null;
 }
 
 export interface ListCustomersQuery {
@@ -95,6 +103,16 @@ export class CompanyService {
       joinedAt: company.joinedAt,
       qrToken: company.qrToken,
       qrUrl: this.buildQrUrl(company.qrToken),
+      subscriptionExpiresAt: company.subscriptionExpiresAt,
+      currentPlan: company.currentPlan
+        ? {
+            id: company.currentPlan.id,
+            name: company.currentPlan.name,
+            durationDays: company.currentPlan.durationDays,
+            price: company.currentPlan.price,
+            currency: company.currentPlan.currency,
+          }
+        : null,
     };
   }
 
@@ -147,56 +165,6 @@ export class CompanyService {
       throw NotFoundError("Purchase not found");
     }
     return purchase;
-  }
-
-  async exportCustomersCsv(companyId: string): Promise<string> {
-    const customers = await this.customerRepository.exportByCompany(companyId);
-    const header = [
-      "Full Name",
-      "Mobile",
-      "Vehicle Number",
-      "Total Spend",
-      "Submission Count",
-      "First Submission",
-      "Last Submission",
-    ];
-    const rows = customers.map((c) => [
-      c.fullName,
-      c.mobile,
-      c.vehicleNumber ?? "",
-      c.totalInvoiceAmount,
-      String(c.submissionCount),
-      c.firstSubmissionAt.toISOString(),
-      c.lastSubmissionAt.toISOString(),
-    ]);
-    return this.buildCsv([header, ...rows]);
-  }
-
-  async exportPurchasesCsv(companyId: string): Promise<string> {
-    const purchases = await this.purchaseRepository.exportByCompany(companyId);
-    const header = [
-      "Invoice Number",
-      "Amount",
-      "Full Name",
-      "Vehicle Number",
-      "Mobile",
-      "Submitted At",
-    ];
-    const rows = purchases.map((p) => [
-      p.invoiceNumber,
-      p.invoiceAmount,
-      p.fullNameSnapshot,
-      p.vehicleNumberSnapshot ?? "",
-      p.customer?.mobile ?? "",
-      p.submittedAt.toISOString(),
-    ]);
-    return this.buildCsv([header, ...rows]);
-  }
-
-  private buildCsv(rows: string[][]): string {
-    return rows
-      .map((cols) => cols.map((v) => `"${v.replaceAll('"', '""')}"`).join(","))
-      .join("\r\n");
   }
 
   private buildQrUrl(qrToken: string): string {
