@@ -17,9 +17,9 @@
     "format:check": "prettier --check \"src/**/*.ts\" \"migrations/**/*.ts\"",
     "prepare": "husky",
     "seed:superadmin": "tsx scripts/create-superadmin.ts",
-    "migration:generate": "npm run build && npx tsx ./node_modules/typeorm/cli.js -d dist/data-source.js migration:generate",
-    "migration:run": "npm run build && npx tsx ./node_modules/typeorm/cli.js -d dist/data-source.js migration:run",
-    "migration:revert": "npm run build && npx tsx ./node_modules/typeorm/cli.js -d dist/data-source.js migration:revert",
+    "migration:generate": "npx tsx ./node_modules/typeorm/cli.js -d data-source.ts migration:generate",
+    "migration:run": "npm run build && node dist/scripts/run-migrations.js",
+    "migration:revert": "npm run build && node dist/scripts/revert-migration.js",
     "migration:show": "npx tsx ./node_modules/typeorm/cli.js -d data-source.ts migration:show",
     "test": "jest"
   },
