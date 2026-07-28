@@ -1,0 +1,46 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          script: |
+            set -e
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+            cd /home/ubuntu/apps/backend
+
+            echo ">>> Pulling latest code..."
+            git pull origin main
+
+            echo ">>> Installing dependencies..."
+            npm install --production=false
+
+            echo ">>> Building..."
+            npm run build
+
+            echo ">>> Running migrations..."
+            NODE_ENV=production npm run migration:run
+
+            echo ">>> Restarting backend..."
+            pm2 restart kimatrix-api
+
+            echo ">>> Waiting for startup..."
+            sleep 3
+
+            echo ">>> Health check..."
+            curl -sf http://localhost:9420/health || (pm2 logs kimatrix-api --lines 20 --nostream && exit 1)
+
+            echo ">>> Deploy complete!"
