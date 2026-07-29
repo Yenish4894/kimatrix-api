@@ -8,6 +8,23 @@ import { closeEmailQueue } from "@/queues/email.queue";
 import { startEmailWorker, stopEmailWorker } from "@/workers/email.worker";
 import { startTokenCleanupCron, stopTokenCleanupCron } from "@/cron/tokenCleanup.cron";
 import { logger } from "@/utils/logger";
+import { getMailer } from "@/config/mailer";
+
+async function checkSmtpConnection(): Promise<void> {
+  if (!config.SMTP_HOST || !config.SMTP_USER || !config.SMTP_PASS) {
+    logger.warn("SMTP is not configured — email sending will not work");
+    return;
+  }
+  try {
+    await getMailer().verify();
+    logger.info({ host: config.SMTP_HOST, port: config.SMTP_PORT }, "SMTP connection verified");
+  } catch (err) {
+    logger.warn(
+      { err, host: config.SMTP_HOST, port: config.SMTP_PORT },
+      "SMTP connection failed — email sending will not work until this is resolved",
+    );
+  }
+}
 
 function warnIfPaymentsMisconfigured(): void {
   if (!isProduction) return;
@@ -38,6 +55,7 @@ async function start(): Promise<void> {
   validateConfig();
   warnIfPaymentsMisconfigured();
   await initializeDatabase();
+  await checkSmtpConnection();
   getRedisClient();
   startEmailWorker();
   startTokenCleanupCron();
