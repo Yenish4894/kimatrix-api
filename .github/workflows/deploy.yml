@@ -38,9 +38,9 @@ jobs:
             pm2 restart kimatrix-api
 
             echo ">>> Waiting for startup..."
-            sleep 3
+            sleep 5
 
             echo ">>> Health check..."
-            curl -sf http://localhost:9420/health || (pm2 logs kimatrix-api --lines 20 --nostream && exit 1)
+            curl -sf --retry 5 --retry-delay 2 http://127.0.0.1:9420/health || (pm2 logs kimatrix-api --lines 20 --nostream && exit 1)
 
             echo ">>> Deploy complete!"
