@@ -3,6 +3,7 @@ import { UnauthorizedError, ForbiddenError } from "@/errors/index";
 import { TokenService } from "@/services/TokenService";
 import { UserRepository } from "@/repositories/UserRepository";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
+import { computeEntitlement } from "@/utils/entitlement";
 
 const tokenService = new TokenService();
 const userRepository = new UserRepository();
@@ -67,6 +68,18 @@ export async function optionalAuthMiddleware(
   }
 }
 
+/**
+ * Establishes company context. Blocks ONLY admin-deactivated accounts.
+ *
+ * It deliberately no longer rejects on `!company.isActive`. Expired, pending and
+ * lapsed-trial companies must still reach `/company/profile`, the billing routes and
+ * the data-export routes — they need to be able to pay, or to download their data and
+ * leave. Gating those out here is what forced every "expired but still allowed" route
+ * into a separate middleware and produced the inconsistency this replaces.
+ *
+ * Whether a route needs a live subscription is decided by `requireActiveSubscription`,
+ * reading the `req.entitlement` attached here.
+ */
 export async function companyMiddleware(
   req: Request,
   res: Response,
@@ -85,41 +98,14 @@ export async function companyMiddleware(
       if (!company) {
         throw ForbiddenError("Company profile not found for this user");
       }
-      if (!company.isActive) {
-        throw ForbiddenError("Company account is deactivated");
-      }
-      req.company = company;
-      next();
-    } catch (inner) {
-      next(inner);
-    }
-  });
-}
 
-// Used by payment routes — allows pending (isActive=false, deactivatedAt=null) and active companies.
-// Deactivated companies are still blocked.
-export async function billingCompanyMiddleware(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
-  await authMiddleware(req, res, async (err?: unknown) => {
-    if (err) return next(err);
-    try {
-      if (!req.user) {
-        throw UnauthorizedError("Authentication required");
+      const entitlement = computeEntitlement(company, new Date());
+      if (entitlement.status === "deactivated") {
+        throw ForbiddenError("Your account has been deactivated. Please contact support.");
       }
-      if (req.user.userType !== "company") {
-        throw ForbiddenError("Company access required");
-      }
-      const company = await companyRepository.findByOwnerUserId(req.user.id);
-      if (!company) {
-        throw ForbiddenError("Company profile not found for this user");
-      }
-      if (!company.isActive && company.deactivatedAt != null) {
-        throw ForbiddenError("Company account is deactivated");
-      }
+
       req.company = company;
+      req.entitlement = entitlement;
       next();
     } catch (inner) {
       next(inner);

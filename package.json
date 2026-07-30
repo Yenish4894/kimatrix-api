@@ -21,7 +21,7 @@
     "migration:run": "npm run build && node dist/scripts/run-migrations.js",
     "migration:revert": "npm run build && node dist/scripts/revert-migration.js",
     "migration:show": "npx tsx ./node_modules/typeorm/cli.js -d data-source.ts migration:show",
-    "test": "jest"
+    "test": "tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

@@ -12,13 +12,21 @@ import {
   TooManyRequestsError,
 } from "@/errors/index";
 import { logger } from "@/utils/logger";
+import { computeEntitlement } from "@/utils/entitlement";
 import type { SubmitPurchaseInput } from "@/validation/schemas/qr.schema";
 
 export interface QrResolveResult {
   companyId: string;
   companyName: string;
   businessType: Company["businessType"];
-  isActive: boolean;
+  /**
+   * Whether a submission would actually be accepted right now. Replaces the old raw
+   * `isActive`, which ignored expiry — so the scan page rendered a working form and
+   * the customer only discovered the problem after filling it in and pressing submit.
+   */
+  isAcceptingSubmissions: boolean;
+  /** Drives the currency symbol on the customer form. */
+  country: string;
 }
 
 export interface SubmitPurchaseContext {
@@ -44,11 +52,15 @@ export class QrService {
     if (!company) {
       throw NotFoundError("QR code not recognized");
     }
+    // Deliberately returns 200 with a flag rather than an error: the page renders a
+    // branded "not accepting submissions" state. The reason is never disclosed —
+    // this endpoint is public and unauthenticated.
     return {
       companyId: company.id,
       companyName: company.name,
       businessType: company.businessType,
-      isActive: company.isActive,
+      isAcceptingSubmissions: computeEntitlement(company, new Date()).hasAccess,
+      country: company.country,
     };
   }
 
@@ -62,10 +74,7 @@ export class QrService {
       if (!company) {
         throw NotFoundError("QR code not recognized");
       }
-      if (!company.isActive) {
-        throw BadRequestError("This company is not currently accepting submissions");
-      }
-      if (company.subscriptionExpiresAt && company.subscriptionExpiresAt < new Date()) {
+      if (!computeEntitlement(company, new Date()).hasAccess) {
         throw BadRequestError("This company is not currently accepting submissions");
       }
 

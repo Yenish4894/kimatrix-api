@@ -1,6 +1,7 @@
 import { config } from "@/config/index";
 import { NotFoundError } from "@/errors/index";
-import type { Company } from "@/entities/Company";
+import type { Company, SubscriptionStatus } from "@/entities/Company";
+import { computeEntitlement } from "@/utils/entitlement";
 import type { Customer } from "@/entities/Customer";
 import type { Purchase } from "@/entities/Purchase";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
@@ -33,6 +34,22 @@ export interface CompanyProfile {
   qrToken: string;
   qrUrl: string;
   subscriptionExpiresAt: Date | null;
+
+  // ── Entitlement, computed server-side ──
+  /**
+   * The frontend gate reads THIS and nothing else. It must never re-derive access
+   * from a date: the old client-side `expiresAt > Date.now()` disagreed with the
+   * backend about what a null expiry meant, and was vulnerable to client clock skew.
+   */
+  hasAccess: boolean;
+  subscriptionStatus: SubscriptionStatus;
+  /** Unified end-of-access across trial, paid and comp. `null` = perpetual or never started. */
+  accessUntil: Date | null;
+  trialEndsAt: Date | null;
+  isTrial: boolean;
+  isComped: boolean;
+  canExport: boolean;
+
   currentPlan: {
     id: string;
     name: string;
@@ -85,6 +102,7 @@ export class CompanyService {
   }
 
   getProfile(company: Company): CompanyProfile {
+    const entitlement = computeEntitlement(company, new Date());
     return {
       id: company.id,
       name: company.name,
@@ -104,6 +122,13 @@ export class CompanyService {
       qrToken: company.qrToken,
       qrUrl: this.buildQrUrl(company.qrToken),
       subscriptionExpiresAt: company.subscriptionExpiresAt,
+      hasAccess: entitlement.hasAccess,
+      subscriptionStatus: entitlement.status,
+      accessUntil: entitlement.endsAt,
+      trialEndsAt: company.trialEndsAt,
+      isTrial: entitlement.isTrial,
+      isComped: company.isComped,
+      canExport: entitlement.canExport,
       currentPlan: company.currentPlan
         ? {
             id: company.currentPlan.id,

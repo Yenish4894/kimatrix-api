@@ -8,5 +8,6 @@ export {
   ValidationError,
   InternalError,
   TooManyRequestsError,
+  SubscriptionRequiredError,
 } from "@/middleware/errorHandler";
 export type { AppErrorDetail } from "@/middleware/errorHandler";

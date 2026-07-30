@@ -19,8 +19,30 @@ import { Payment } from "./Payment";
 export const BUSINESS_TYPES = ["fuel_station", "shop"] as const;
 export type BusinessType = (typeof BUSINESS_TYPES)[number];
 
+/**
+ * Materialized projection of `computeEntitlement()` — kept for indexed queries
+ * (expiry cron, admin filters, platform stats) and the UI badge.
+ *
+ * Access control NEVER reads this column. Every gate calls `computeEntitlement()`
+ * in real time, so a cron outage or clock skew can't lock a paying customer out.
+ */
+export const SUBSCRIPTION_STATUSES = [
+  "pending",
+  "trialing",
+  "active",
+  "trial_expired",
+  "expired",
+  "past_due",
+  "deactivated",
+] as const;
+export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number];
+
 @Entity("companies")
 @Check(`"business_type" IN ('fuel_station', 'shop')`)
+@Check(
+  "chk_companies_subscription_status",
+  `"subscription_status" IN ('pending', 'trialing', 'active', 'trial_expired', 'expired', 'past_due', 'deactivated')`,
+)
 export class Company extends BaseEntity {
   @OneToOne(() => User, (user) => user.company, {
     nullable: false,
@@ -95,8 +117,51 @@ export class Company extends BaseEntity {
   @JoinColumn({ name: "current_plan_id" })
   currentPlan!: Relation<Plan> | null;
 
+  /**
+   * End of PAID time. `null` means no paid subscription has ever been purchased —
+   * it does NOT mean unlimited access. Unlimited access is `isComped`, nothing else.
+   */
   @Column({ name: "subscription_expires_at", type: "timestamptz", nullable: true })
   subscriptionExpiresAt!: Date | null;
+
+  // ── Trial (written from Phase 3 onward; inert until then) ──
+
+  @Column({ name: "trial_started_at", type: "timestamptz", nullable: true })
+  trialStartedAt!: Date | null;
+
+  /**
+   * Deliberately NOT folded into `subscriptionExpiresAt`:
+   * `PaymentService.computeSubscriptionDates` stacks a new plan on top of a live
+   * expiry, so a trial living in that column would gift its remaining days to
+   * anyone who subscribes mid-trial.
+   */
+  @Column({ name: "trial_ends_at", type: "timestamptz", nullable: true })
+  trialEndsAt!: Date | null;
+
+  // ── Entitlement projection + admin comp ──
+
+  @Column({
+    name: "subscription_status",
+    type: "varchar",
+    length: 24,
+    default: "pending",
+  })
+  subscriptionStatus!: SubscriptionStatus;
+
+  /** The explicit admin free-override. Replaces the old `subscriptionExpiresAt IS NULL` hack. */
+  @Column({ name: "is_comped", type: "boolean", default: false })
+  isComped!: boolean;
+
+  /** `null` while `isComped` is true means a perpetual comp. */
+  @Column({ name: "comped_until", type: "timestamptz", nullable: true })
+  compedUntil!: Date | null;
+
+  @Column({ name: "comp_reason", type: "varchar", length: 255, nullable: true })
+  compReason!: string | null;
+
+  @ManyToOne(() => User, { nullable: true, onDelete: "SET NULL" })
+  @JoinColumn({ name: "comp_granted_by_user_id" })
+  compGrantedBy!: Relation<User> | null;
 
   @OneToMany(() => Customer, (customer) => customer.company)
   customers!: Relation<Customer[]>;

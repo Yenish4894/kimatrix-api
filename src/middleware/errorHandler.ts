@@ -48,6 +48,18 @@ export const ValidationError = (message = "Validation failed", details: AppError
 export const TooManyRequestsError = (message = "Too many requests") =>
   new AppError(message, 429, "RATE_LIMIT_EXCEEDED");
 
+/**
+ * Distinct from ForbiddenError so the frontend can react deterministically —
+ * show the paywall rather than a generic "access denied".
+ *
+ * 403 rather than 402: 402 is poorly handled by proxies, and the client's error
+ * interceptor already understands 403.
+ */
+export const SubscriptionRequiredError = (
+  message = "Your subscription has expired. Renew your plan to continue using the dashboard.",
+  details?: AppErrorDetail[],
+) => new AppError(message, 403, "SUBSCRIPTION_REQUIRED", details);
+
 export const InternalError = (message = "Internal server error") =>
   new AppError(message, 500, "INTERNAL_ERROR");
 
