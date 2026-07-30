@@ -28,6 +28,16 @@ jobs:
             echo ">>> Installing dependencies..."
             npm install --production=false
 
+            # tsc does not prune dist, so files deleted from src linger as stale JS.
+            # This bit us with migrations: dist/migrations still held the four
+            # pre-consolidation migrations that 1777400000000-initialSchema.ts
+            # replaced. TypeORM loads every file in that directory, so on any
+            # rebuilt-from-scratch server it would have tried to run superseded
+            # migrations. Removing already-applied files is safe — `migration:run`
+            # only executes files that are NOT recorded in the migrations table.
+            echo ">>> Cleaning stale build output..."
+            rm -rf dist
+
             echo ">>> Building..."
             npm run build
 

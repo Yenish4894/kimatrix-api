@@ -485,9 +485,12 @@ docker run -d \
 NODE_ENV=production
 DB_SSL=true
 PAYPAL_MODE=live
-APP_BASE_URL=https://api.kimates.com
+APP_BASE_URL=https://kimates.com
 FRONTEND_BASE_URL=https://kimates.com
 ```
+
+The API is reverse-proxied under the main domain at `/api` — there is no `api.*`
+subdomain, and `api.kimates.com` does not resolve.
 
 ---
 
