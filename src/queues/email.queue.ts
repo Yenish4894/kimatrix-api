@@ -9,6 +9,13 @@ export type EmailJobData =
       expiresInMinutes: number;
     }
   | {
+      type: "emailVerification";
+      to: string;
+      verifyUrl: string;
+      expiresInMinutes: number;
+      trialDurationDays: number;
+    }
+  | {
       type: "generic";
       to: string;
       subject: string;

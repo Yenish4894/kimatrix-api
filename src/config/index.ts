@@ -29,6 +29,15 @@ export const config = {
   RATE_LIMIT_MAX_REQUESTS: parseInt10(process.env["RATE_LIMIT_MAX_REQUESTS"], 100),
   PASSWORD_RESET_TTL_MIN: parseInt10(process.env["PASSWORD_RESET_TTL_MIN"], 15),
 
+  // 24h, far longer than a password reset: this link is the very first thing a new
+  // customer receives, and a short window would strand anyone who signs up and
+  // checks their inbox later.
+  EMAIL_VERIFICATION_TTL_MIN: parseInt10(process.env["EMAIL_VERIFICATION_TTL_MIN"], 1440),
+
+  // Free trial length. Env-overridable so a promo can be run without a deploy.
+  // The clock starts on email verification, not registration.
+  TRIAL_DURATION_DAYS: parseInt10(process.env["TRIAL_DURATION_DAYS"], 4),
+
   REDIS_HOST: process.env["REDIS_HOST"] ?? "localhost",
   REDIS_PORT: parseInt10(process.env["REDIS_PORT"], 6379),
   REDIS_PASSWORD: process.env["REDIS_PASSWORD"] ?? "",

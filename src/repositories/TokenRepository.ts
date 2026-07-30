@@ -60,6 +60,39 @@ export class TokenRepository {
       .getOne();
   }
 
+  async findUsableEmailVerificationToken(
+    tokenHash: string,
+    manager?: EntityManager,
+  ): Promise<Token | null> {
+    return this.getRepo(manager)
+      .createQueryBuilder("t")
+      .addSelect("t.tokenHash")
+      .leftJoinAndSelect("t.user", "u")
+      .where("t.tokenHash = :tokenHash", { tokenHash })
+      .andWhere("t.type = :type", { type: "email_verification" })
+      .andWhere("t.consumedAt IS NULL")
+      .andWhere("t.expiresAt > NOW()")
+      .getOne();
+  }
+
+  async consumeEmailVerificationToken(id: string, manager?: EntityManager): Promise<void> {
+    await this.getRepo(manager).update(
+      { id, type: "email_verification", consumedAt: IsNull() },
+      { consumedAt: new Date() },
+    );
+  }
+
+  async invalidateActiveEmailVerifications(userId: string, manager?: EntityManager): Promise<void> {
+    await this.getRepo(manager)
+      .createQueryBuilder()
+      .update(Token)
+      .set({ consumedAt: new Date() })
+      .where("user_id = :userId", { userId })
+      .andWhere("type = :type", { type: "email_verification" })
+      .andWhere("consumed_at IS NULL")
+      .execute();
+  }
+
   async revokeRefreshToken(id: string, manager?: EntityManager): Promise<void> {
     await this.getRepo(manager).update(
       { id, type: "refresh", revokedAt: IsNull() },

@@ -2,13 +2,19 @@ import { Entity, Column, ManyToOne, JoinColumn, Index, type Relation } from "typ
 import { BaseEntity } from "./BaseEntity";
 import { User } from "./User";
 
-export const TOKEN_TYPES = ["refresh", "password_reset"] as const;
+export const TOKEN_TYPES = ["refresh", "password_reset", "email_verification"] as const;
 export type TokenType = (typeof TOKEN_TYPES)[number];
 
 @Entity("tokens")
 @Index("uq_tokens_active_password_reset", ["user"], {
   unique: true,
   where: "type = 'password_reset' AND consumed_at IS NULL",
+})
+// Same rapid-fire guard as password reset: at most one live verification link per
+// user, so mashing "resend" can't leave a fan of simultaneously-valid tokens.
+@Index("uq_tokens_active_email_verification", ["user"], {
+  unique: true,
+  where: "type = 'email_verification' AND consumed_at IS NULL",
 })
 export class Token extends BaseEntity {
   @ManyToOne(() => User, (user) => user.tokens, {

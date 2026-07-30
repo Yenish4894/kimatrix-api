@@ -15,7 +15,7 @@ export class CompanyController extends BaseController {
     await this.handle(req, res, next, async () => {
       const company = req.company;
       if (!company) throw UnauthorizedError("Company context missing");
-      return { data: this.companyService.getProfile(company) };
+      return { data: this.companyService.getProfile(company, req.user?.emailVerifiedAt) };
     });
   };
 
@@ -24,7 +24,11 @@ export class CompanyController extends BaseController {
       const company = req.company;
       if (!company) throw UnauthorizedError("Company context missing");
       const input = req.body as UpdateProfileInput;
-      const updated = await this.companyService.updateProfile(company.id, input);
+      const updated = await this.companyService.updateProfile(
+        company.id,
+        input,
+        req.user?.emailVerifiedAt,
+      );
       return { data: updated, message: "Profile updated successfully" };
     });
   };

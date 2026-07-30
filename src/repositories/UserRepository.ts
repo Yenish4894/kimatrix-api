@@ -43,6 +43,10 @@ export class UserRepository {
     return repo.save(repo.create(data));
   }
 
+  async markEmailVerified(userId: string, manager?: EntityManager): Promise<void> {
+    await this.getRepo(manager).update({ id: userId }, { emailVerifiedAt: new Date() });
+  }
+
   async updatePasswordChanged(
     userId: string,
     passwordHash: string,

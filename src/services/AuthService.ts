@@ -61,6 +61,8 @@ export interface RegisterCompanyResult {
   >;
   companyId: string;
   companyIsActive: boolean;
+  /** False until the verification link is clicked. The trial clock starts on verify. */
+  emailVerified: boolean;
   tokens: IssuedTokens;
 }
 
@@ -165,12 +167,23 @@ export class AuthService {
         },
         companyId: company.id,
         companyIsActive: company.isActive,
+        emailVerified: user.emailVerifiedAt != null,
         tokens,
       };
     };
 
+    // A caller supplying its own manager owns the commit, so it also owns sending the
+    // verification mail — we cannot enqueue against rows it hasn't committed yet.
     if (outerManager) return run(outerManager);
-    return AppDataSource.transaction(run);
+
+    const result = await AppDataSource.transaction(run);
+
+    // Deliberately after commit. Enqueuing inside the transaction would send a
+    // "welcome, confirm your email" message for a registration that then rolled back,
+    // and would let a Redis outage fail an otherwise-valid signup.
+    await this.requestEmailVerification(result.user.id, context);
+
+    return result;
   }
 
   async login(input: LoginInput, context: LoginContext): Promise<LoginResult> {
@@ -354,6 +367,95 @@ export class AuthService {
       // generic success message and the user can re-request.
       logger.error({ err, userId: user.id }, "Failed to enqueue password reset email");
     }
+  }
+
+  /**
+   * Issue (or re-issue) an email-verification link.
+   *
+   * Returns void unconditionally and the controller always responds with the same
+   * generic message — an authenticated caller already knows their own address, and
+   * keeping the shape uniform means the unauthenticated resend path can share this
+   * code later without becoming an enumeration oracle.
+   */
+  async requestEmailVerification(userId: string, context: LoginContext): Promise<void> {
+    const user = await this.userRepository.findById(userId);
+    if (!user?.isActive) return;
+    if (user.emailVerifiedAt) {
+      logger.info({ userId }, "Email verification requested but already verified");
+      return;
+    }
+
+    const raw = generateRandomToken(32);
+    const hash = this.tokenService.hashToken(raw);
+    const ttlMs = config.EMAIL_VERIFICATION_TTL_MIN * 60 * 1000;
+    const expiresAt = new Date(Date.now() + ttlMs);
+
+    await AppDataSource.transaction(async (manager) => {
+      // Consume any outstanding link first — the partial unique index permits only
+      // one live token per user, so a resend must retire the previous one.
+      await this.tokenRepository.invalidateActiveEmailVerifications(user.id, manager);
+      await this.tokenRepository.create(
+        {
+          user,
+          type: "email_verification",
+          tokenHash: hash,
+          expiresAt,
+          ipAddress: context.ip ?? null,
+          userAgent: context.userAgent ?? null,
+        },
+        manager,
+      );
+    });
+
+    logger.info({ userId: user.id, expiresAt }, "Email verification token issued");
+
+    try {
+      await this.emailService.enqueueEmailVerification({
+        to: user.email,
+        verificationToken: raw,
+        expiresInMinutes: config.EMAIL_VERIFICATION_TTL_MIN,
+      });
+    } catch (err) {
+      // Same posture as password reset: a queue outage must not fail the request.
+      logger.error({ err, userId: user.id }, "Failed to enqueue verification email");
+    }
+  }
+
+  /**
+   * Consume a verification link and stamp `users.email_verified_at`.
+   *
+   * Deliberately idempotent-friendly: re-clicking a consumed link fails closed with
+   * the same message as an invalid one, but an already-verified user hitting a fresh
+   * link is a no-op rather than an error.
+   *
+   * The trial clock is started by the caller (Phase 3), not here — this method's only
+   * job is to establish that the address is real.
+   */
+  async confirmEmailVerification(token: string): Promise<{ userId: string; email: string }> {
+    return AppDataSource.transaction(async (manager) => {
+      const tokenHash = this.tokenService.hashToken(token);
+      const tokenRow = await this.tokenRepository.findUsableEmailVerificationToken(
+        tokenHash,
+        manager,
+      );
+      if (!tokenRow) {
+        throw UnauthorizedError("This verification link is invalid or has expired.");
+      }
+
+      const user = await this.userRepository.findById(tokenRow.user.id, manager);
+      if (!user?.isActive) {
+        throw UnauthorizedError("User account is not available");
+      }
+
+      await this.tokenRepository.consumeEmailVerificationToken(tokenRow.id, manager);
+
+      if (!user.emailVerifiedAt) {
+        await this.userRepository.markEmailVerified(user.id, manager);
+        logger.info({ userId: user.id }, "Email verified");
+      }
+
+      return { userId: user.id, email: user.email };
+    });
   }
 
   async changePassword(userId: string, input: PasswordChangeInput): Promise<void> {

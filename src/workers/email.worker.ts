@@ -3,6 +3,7 @@ import { fromAddress, getMailer } from "@/config/mailer";
 import { redisConfig } from "@/config/redis.config";
 import { EMAIL_QUEUE_NAME, type EmailJobData } from "@/queues/email.queue";
 import { renderPasswordResetEmail } from "@/templates/passwordReset.template";
+import { renderEmailVerificationEmail } from "@/templates/emailVerification.template";
 import { logger } from "@/utils/logger";
 
 let worker: Worker<EmailJobData> | null = null;
@@ -15,6 +16,23 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     const rendered = renderPasswordResetEmail({
       resetUrl: data.resetUrl,
       expiresInMinutes: data.expiresInMinutes,
+    });
+    await mailer.sendMail({
+      from: fromAddress(),
+      to: data.to,
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+    });
+    logger.info({ jobId: job.id, type: data.type, to: data.to }, "Email sent");
+    return;
+  }
+
+  if (data.type === "emailVerification") {
+    const rendered = renderEmailVerificationEmail({
+      verifyUrl: data.verifyUrl,
+      expiresInMinutes: data.expiresInMinutes,
+      trialDurationDays: data.trialDurationDays,
     });
     await mailer.sendMail({
       from: fromAddress(),

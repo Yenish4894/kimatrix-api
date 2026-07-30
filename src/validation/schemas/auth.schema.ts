@@ -105,6 +105,24 @@ export interface PasswordResetConfirmInput {
   confirmNewPassword: string;
 }
 
+export const emailVerificationConfirmSchema = Joi.object({
+  // Single generic message: this is a public endpoint and the exact rule that
+  // failed is of no use to a legitimate user, who only ever pastes a whole link.
+  token: Joi.string().trim().min(20).max(256).required().messages({
+    "string.base": "This verification link is invalid or has expired.",
+    "string.empty": "This verification link is invalid or has expired.",
+    "string.min": "This verification link is invalid or has expired.",
+    "string.max": "This verification link is invalid or has expired.",
+    "any.required": "This verification link is invalid or has expired.",
+  }),
+})
+  .strict()
+  .required();
+
+export interface EmailVerificationConfirmInput {
+  token: string;
+}
+
 export const passwordChangeSchema = Joi.object({
   currentPassword: Joi.string().min(1).max(128).required(),
   newPassword: commonPatterns.password.required(),

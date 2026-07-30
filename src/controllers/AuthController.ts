@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import { BaseController } from "@/controllers/BaseController";
 import { AuthService } from "@/services/AuthService";
 import type {
+  EmailVerificationConfirmInput,
   LoginInput,
   PasswordChangeInput,
   PasswordResetConfirmInput,
@@ -77,6 +78,35 @@ export class AuthController extends BaseController {
       const payload = req.body as PasswordResetConfirmInput;
       await this.authService.confirmPasswordReset(payload);
       return { data: null, message: "Password has been reset. Please log in again." };
+    });
+  };
+
+  resendEmailVerification = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      if (!req.user) throw new Error("Auth context missing");
+      await this.authService.requestEmailVerification(req.user.id, {
+        ip: req.ip,
+        userAgent: req.get("user-agent") ?? undefined,
+      });
+      // Same message whether a mail was sent or the address was already verified —
+      // no reason to expose the difference, and the UI reads better for it.
+      return { data: null, message: "Verification email sent. Please check your inbox." };
+    });
+  };
+
+  confirmEmailVerification = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const payload = req.body as EmailVerificationConfirmInput;
+      await this.authService.confirmEmailVerification(payload.token);
+      return { data: null, message: "Your email has been confirmed." };
     });
   };
 

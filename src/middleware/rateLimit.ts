@@ -71,6 +71,28 @@ export const passwordResetRequestLimiter = buildLimiter({
   message: "Too many password reset requests. Please try again in a minute.",
 });
 
+// Registration had no limiter at all — only the 100-per-15-min global cap. It now
+// sends a verification email and (from Phase 3) dispenses a free trial, so it is
+// both a spam vector and a value-dispensing endpoint.
+//
+// Deliberately NOT skipSuccessfulRequests (unlike loginLimiter): successful
+// registrations are precisely what we are limiting.
+export const registerLimiter = buildLimiter({
+  prefix: "auth_register",
+  windowMs: ONE_MIN * 60,
+  limit: 5,
+  message: "Too many registration attempts from this network. Please try again later.",
+});
+
+// Resend is authenticated, but still capped: each call sends a real email, so an
+// uncapped endpoint is a spam amplifier pointed at the user's own inbox.
+export const emailVerificationResendLimiter = buildLimiter({
+  prefix: "auth_verify_resend",
+  windowMs: ONE_MIN * 10,
+  limit: 3,
+  message: "Too many verification emails requested. Please try again in a few minutes.",
+});
+
 export const passwordResetConfirmLimiter = buildLimiter({
   prefix: "auth_pwreset_confirm",
   windowMs: ONE_MIN,

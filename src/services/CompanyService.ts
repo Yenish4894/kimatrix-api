@@ -49,6 +49,12 @@ export interface CompanyProfile {
   isTrial: boolean;
   isComped: boolean;
   canExport: boolean;
+  /**
+   * Owner's email confirmation state. Lives on `users`, surfaced here because the
+   * dashboard needs it for the "confirm your email" banner and, from Phase 3, to
+   * explain why a trial hasn't started yet.
+   */
+  emailVerified: boolean;
 
   currentPlan: {
     id: string;
@@ -83,7 +89,11 @@ export class CompanyService {
   private customerRepository = new CustomerRepository();
   private purchaseRepository = new PurchaseRepository();
 
-  async updateProfile(companyId: string, input: UpdateProfileInput): Promise<CompanyProfile> {
+  async updateProfile(
+    companyId: string,
+    input: UpdateProfileInput,
+    emailVerifiedAt?: Date | null,
+  ): Promise<CompanyProfile> {
     const updates: Parameters<CompanyRepository["updateProfile"]>[1] = {};
     if (input.streetAddress !== undefined) updates.streetAddress = input.streetAddress;
     if (input.city !== undefined) updates.city = input.city;
@@ -98,10 +108,15 @@ export class CompanyService {
     await this.companyRepository.updateProfile(companyId, updates);
     const updated = await this.companyRepository.findById(companyId);
     if (!updated) throw new Error("Company not found after update");
-    return this.getProfile(updated);
+    return this.getProfile(updated, emailVerifiedAt);
   }
 
-  getProfile(company: Company): CompanyProfile {
+  /**
+   * `emailVerifiedAt` is passed in rather than read off `company.owner` because
+   * `findByOwnerUserId` does not join the owner relation — the caller already has
+   * the authenticated user on the request.
+   */
+  getProfile(company: Company, emailVerifiedAt?: Date | null): CompanyProfile {
     const entitlement = computeEntitlement(company, new Date());
     return {
       id: company.id,
@@ -129,6 +144,7 @@ export class CompanyService {
       isTrial: entitlement.isTrial,
       isComped: company.isComped,
       canExport: entitlement.canExport,
+      emailVerified: (emailVerifiedAt ?? company.owner?.emailVerifiedAt ?? null) != null,
       currentPlan: company.currentPlan
         ? {
             id: company.currentPlan.id,
