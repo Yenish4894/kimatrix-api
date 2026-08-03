@@ -26,3 +26,117 @@ export const companyIdParamSchema = Joi.object({
 })
   .strict()
   .required();
+
+// ─── Plan management ───────────────────────────────────────────
+
+const planName = Joi.string().trim().min(2).max(100).messages({
+  "string.empty": "Enter a name for the plan.",
+  "string.min": "The plan name is too short.",
+  "string.max": "The plan name is too long.",
+});
+
+const planDescription = Joi.string().trim().max(255).allow("", null).messages({
+  "string.max": "The description is too long.",
+});
+
+const planDurationDays = Joi.number().integer().min(1).max(3650).messages({
+  "number.base": "Enter the plan duration in days.",
+  "number.integer": "The plan duration must be a whole number of days.",
+  "number.min": "The plan must run for at least one day.",
+  "number.max": "The plan duration is unrealistically long.",
+});
+
+// Accepted as a string so a decimal price survives the trip without float rounding.
+const planPrice = Joi.string()
+  .trim()
+  .pattern(/^\d{1,7}(\.\d{1,2})?$/)
+  .messages({
+    "string.empty": "Enter a price for the plan.",
+    "string.pattern.base": "Enter a valid price, for example 249.99.",
+  });
+
+export const createPlanSchema = Joi.object({
+  name: planName.required(),
+  description: planDescription.optional(),
+  durationDays: planDurationDays.required(),
+  price: planPrice.required(),
+  isPopular: Joi.boolean().optional(),
+  isActive: Joi.boolean().optional(),
+  sortOrder: Joi.number().integer().min(0).max(9999).optional(),
+})
+  .strict()
+  .required();
+
+export interface CreatePlanBody {
+  name: string;
+  description?: string | null;
+  durationDays: number;
+  price: string;
+  isPopular?: boolean;
+  isActive?: boolean;
+  sortOrder?: number;
+}
+
+export const updatePlanSchema = Joi.object({
+  name: planName.optional(),
+  description: planDescription.optional(),
+  durationDays: planDurationDays.optional(),
+  price: planPrice.optional(),
+  isPopular: Joi.boolean().optional(),
+  sortOrder: Joi.number().integer().min(0).max(9999).optional(),
+})
+  .min(1)
+  .strict()
+  .required()
+  .messages({ "object.min": "Change at least one field." });
+
+export interface UpdatePlanBody {
+  name?: string;
+  description?: string | null;
+  durationDays?: number;
+  price?: string;
+  isPopular?: boolean;
+  sortOrder?: number;
+}
+
+export const planIdParamSchema = Joi.object({
+  planId: commonPatterns.uuid.required(),
+})
+  .strict()
+  .required();
+
+export const setPlanActiveSchema = Joi.object({
+  isActive: Joi.boolean().required().messages({
+    "any.required": "Specify whether the plan should be available.",
+  }),
+})
+  .strict()
+  .required();
+
+// ─── Platform settings ─────────────────────────────────────────
+
+export const updateSettingsSchema = Joi.object({
+  trialDurationDays: Joi.number().integer().min(1).max(90).optional().messages({
+    "number.base": "Enter the trial length in days.",
+    "number.integer": "The trial length must be a whole number of days.",
+    "number.min": "The trial must run for at least one day.",
+    "number.max": "The trial cannot be longer than 90 days.",
+  }),
+  platformCurrency: Joi.string()
+    .trim()
+    .uppercase()
+    .pattern(/^[A-Z]{3}$/)
+    .optional()
+    .messages({
+      "string.pattern.base": "Enter a valid three-letter currency code, for example ZAR.",
+    }),
+})
+  .min(1)
+  .strict()
+  .required()
+  .messages({ "object.min": "Change at least one setting." });
+
+export interface UpdateSettingsBody {
+  trialDurationDays?: number;
+  platformCurrency?: string;
+}

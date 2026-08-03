@@ -1,5 +1,6 @@
 import { emailQueue } from "@/queues/email.queue";
 import { config } from "@/config/index";
+import { SettingsService } from "@/services/SettingsService";
 import { logger } from "@/utils/logger";
 
 export interface SendPasswordResetInput {
@@ -15,6 +16,8 @@ export interface SendEmailVerificationInput {
 }
 
 export class EmailService {
+  private settingsService = new SettingsService();
+
   async enqueuePasswordReset(input: SendPasswordResetInput): Promise<void> {
     const expiresInMinutes = input.expiresInMinutes ?? config.PASSWORD_RESET_TTL_MIN;
     const base = config.FRONTEND_BASE_URL.replace(/\/$/, "");
@@ -38,6 +41,10 @@ export class EmailService {
     const base = config.FRONTEND_BASE_URL.replace(/\/$/, "");
     const verifyUrl = `${base}/verify-email?token=${encodeURIComponent(input.verificationToken)}`;
 
+    // Read the live, admin-editable trial length rather than the config fallback, so
+    // the email never promises a different number of days from the one granted.
+    const trialDurationDays = await this.settingsService.getTrialDurationDays();
+
     const job = await emailQueue.add(
       "emailVerification",
       {
@@ -45,7 +52,7 @@ export class EmailService {
         to: input.to,
         verifyUrl,
         expiresInMinutes,
-        trialDurationDays: config.TRIAL_DURATION_DAYS,
+        trialDurationDays,
       },
       { jobId: `verify:${input.to}:${Date.now()}` },
     );

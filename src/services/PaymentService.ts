@@ -11,9 +11,13 @@ import { Company } from "@/entities/Company";
 export interface PlanDto {
   id: string;
   name: string;
+  description: string | null;
   durationDays: number;
   price: string;
   currency: string;
+  /** Drives the "Most Popular" badge. Replaces the frontend's hardcoded 30-day check. */
+  isPopular: boolean;
+  sortOrder: number;
 }
 
 export interface InitiatePaymentResult {
@@ -255,9 +259,12 @@ export class PaymentService {
     return {
       id: plan.id,
       name: plan.name,
+      description: plan.description,
       durationDays: plan.durationDays,
       price: plan.price,
       currency: plan.currency,
+      isPopular: plan.isPopular,
+      sortOrder: plan.sortOrder,
     };
   }
 }

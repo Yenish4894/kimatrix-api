@@ -34,9 +34,11 @@ export const config = {
   // checks their inbox later.
   EMAIL_VERIFICATION_TTL_MIN: parseInt10(process.env["EMAIL_VERIFICATION_TTL_MIN"], 1440),
 
-  // Free trial length. Env-overridable so a promo can be run without a deploy.
+  // Fallback free-trial length, used only to seed `app_settings` and if that table
+  // cannot be read. The live value is admin-editable at `PATCH /admin/settings`;
+  // read it via SettingsService, never from here.
   // The clock starts on email verification, not registration.
-  TRIAL_DURATION_DAYS: parseInt10(process.env["TRIAL_DURATION_DAYS"], 4),
+  TRIAL_DURATION_DAYS: parseInt10(process.env["TRIAL_DURATION_DAYS"], 7),
 
   REDIS_HOST: process.env["REDIS_HOST"] ?? "localhost",
   REDIS_PORT: parseInt10(process.env["REDIS_PORT"], 6379),
