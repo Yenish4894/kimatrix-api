@@ -8,7 +8,6 @@ export const AUDIT_ACTIONS = [
   "plan.version",
   "plan.enable",
   "plan.disable",
-  "plan.archive",
   "setting.update",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

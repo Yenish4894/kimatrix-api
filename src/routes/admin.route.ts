@@ -41,10 +41,12 @@ router.patch(
 );
 
 // ─── Plan management ───────────────────────────────────────────
-// Note there is no DELETE. Plans are referenced by payments and by companies with a
-// live subscription, so removing one would orphan real billing records — the FKs are
-// RESTRICT for exactly that reason. Disable hides a plan from new buyers; editing a
-// price or duration archives the plan and creates a successor.
+// Note there is no DELETE. `payments.plan_id` is ON DELETE RESTRICT, so the database
+// would refuse to remove a plan any customer has ever bought — and rightly so, since
+// deleting it would destroy what that invoice was for. (`companies.current_plan_id` is
+// SET NULL, so it would not block the delete; `payments` is what protects us.)
+// Disable hides a plan from new buyers; editing a price or duration archives the plan
+// and creates a successor.
 
 router.get("/plans", controller.listPlans);
 

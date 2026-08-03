@@ -11,8 +11,20 @@ export class AppSettingRepository {
     return this.getRepo(manager).find();
   }
 
-  async findByKey(key: AppSettingKey, manager?: EntityManager): Promise<AppSetting | null> {
-    return this.getRepo(manager).findOne({ where: { key } });
+  /**
+   * Plans that are still sellable and priced in some other currency. Non-zero means a
+   * currency switch would leave the billing page showing two currencies at once.
+   * Archived plans are excluded — they can't be bought, and their currency is
+   * historically correct for the payments that reference them.
+   */
+  async countSellablePlansNotIn(currency: string, manager?: EntityManager): Promise<number> {
+    const rows: { count: string }[] = await this.getRepo(manager).manager.query(
+      `SELECT count(*)::text AS count FROM "plans"
+        WHERE "currency" <> $1 AND "is_active" = true
+          AND "archived_at" IS NULL AND "deleted_at" IS NULL`,
+      [currency],
+    );
+    return Number.parseInt(rows[0]?.count ?? "0", 10);
   }
 
   /**

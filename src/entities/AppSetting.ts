@@ -2,6 +2,12 @@ import { Entity, Column, ManyToOne, JoinColumn, Index, type Relation } from "typ
 import { BaseEntity } from "./BaseEntity";
 import { User } from "./User";
 
+/**
+ * Adding a key here also requires extending the `chk_app_settings_key` CHECK in a
+ * migration — the constraint can't reference this array, so the two must be kept in
+ * step by hand. The CHECK is what stops a typo creating a dead setting that silently
+ * reads back as "unset" forever.
+ */
 export const APP_SETTING_KEYS = ["trial_duration_days", "platform_currency"] as const;
 export type AppSettingKey = (typeof APP_SETTING_KEYS)[number];
 

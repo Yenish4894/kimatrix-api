@@ -119,28 +119,13 @@ export class SuperAdminController extends BaseController {
 
   updateSettings = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
-      const actor = this.actor(req);
-      const body = req.body as UpdateSettingsBody;
-      const before = await this.settingsService.getSettings();
-
-      if (body.trialDurationDays !== undefined) {
-        await this.settingsService.setTrialDurationDays(body.trialDurationDays, actor.id);
-      }
-      if (body.platformCurrency !== undefined) {
-        await this.settingsService.setPlatformCurrency(body.platformCurrency, actor.id);
-      }
-
-      const after = await this.settingsService.getSettings();
-      await this.auditService.record({
-        actorUserId: actor.id,
-        actorEmail: actor.email,
-        action: "setting.update",
-        entityType: "settings",
-        entityId: "platform",
-        before: before as unknown as Record<string, unknown>,
-        after: after as unknown as Record<string, unknown>,
-      });
-
+      // Orchestration lives in the service: the two settings must be written in one
+      // transaction, or a rejected currency change leaves an already-committed trial
+      // length behind while the response says 409.
+      const after = await this.settingsService.updateSettings(
+        req.body as UpdateSettingsBody,
+        this.actor(req),
+      );
       return { data: after, message: "Settings saved." };
     });
   };

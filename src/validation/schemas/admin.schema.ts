@@ -122,10 +122,12 @@ export const updateSettingsSchema = Joi.object({
     "number.min": "The trial must run for at least one day.",
     "number.max": "The trial cannot be longer than 90 days.",
   }),
+  // Deliberately NOT .uppercase()/.trim() here. Object-level `.strict()` sets
+  // convert:false for the whole schema, which turns those from transforms into
+  // assertions — "zar" would be rejected with "must only contain uppercase
+  // characters" instead of being normalized. SettingsService does the normalizing.
   platformCurrency: Joi.string()
-    .trim()
-    .uppercase()
-    .pattern(/^[A-Z]{3}$/)
+    .pattern(/^[A-Za-z]{3}$/)
     .optional()
     .messages({
       "string.pattern.base": "Enter a valid three-letter currency code, for example ZAR.",

@@ -95,26 +95,18 @@ export class PlanService {
   private settingsService = new SettingsService();
   private auditService = new AuditService();
 
-  /** Public catalogue — active plans only, in display order. */
-  async listPublic(): Promise<PlanDto[]> {
-    const plans = await this.planRepository.findAllActive();
-    return plans.map(toDto);
-  }
-
   /**
    * Admin catalogue — everything, annotated with whether each plan can safely be
    * edited in place. The UI uses these flags to explain why an edit will create a new
    * version rather than presenting a silent surprise.
    */
   async listForAdmin(): Promise<PlanDto[]> {
-    const plans = await this.planRepository.findAllForAdmin();
-    return Promise.all(
-      plans.map(async (plan) => ({
-        ...toDto(plan),
-        hasPayments: await this.planRepository.hasPayments(plan.id),
-        hasSubscribers: await this.planRepository.hasSubscribers(plan.id),
-      })),
-    );
+    const plans = await this.planRepository.findAllForAdminWithUsage();
+    return plans.map((plan) => ({
+      ...toDto(plan),
+      hasPayments: plan.hasPayments,
+      hasSubscribers: plan.hasSubscribers,
+    }));
   }
 
   async create(input: CreatePlanInput, actor: Actor): Promise<PlanDto> {
@@ -122,6 +114,11 @@ export class PlanService {
     const price = normalizePrice(input.price);
     const name = input.name.trim();
     if (!name) throw BadRequestError("Enter a name for the plan.");
+    if (input.isPopular === true && input.isActive === false) {
+      throw BadRequestError(
+        "A hidden plan can't be the most popular one — put it on sale or clear the badge.",
+      );
+    }
 
     return AppDataSource.transaction(async (manager) => {
       // Currency is never chosen per-plan; it always follows the platform setting so
@@ -182,11 +179,22 @@ export class PlanService {
     const nextPrice = input.price !== undefined ? normalizePrice(input.price) : undefined;
 
     return AppDataSource.transaction(async (manager) => {
-      const plan = await this.planRepository.findByIdAnyState(planId, manager);
+      // Locked, not a plain read: two concurrent price edits would otherwise both pass
+      // the archived check, both create a successor, and both archive the same
+      // predecessor — leaving an orphaned live plan nobody knows about.
+      const plan = await this.planRepository.findByIdForUpdate(planId, manager);
       if (!plan) throw NotFoundError("That plan no longer exists.");
       if (plan.archivedAt) {
         throw BadRequestError(
           "This plan has been replaced by a newer version and can no longer be edited.",
+        );
+      }
+
+      // A hidden plan wearing the badge would strip it from the plan customers can
+      // actually see, leaving the billing page with no "Most Popular" and no clue why.
+      if (input.isPopular === true && !plan.isActive) {
+        throw BadRequestError(
+          "Put this plan on sale before featuring it — a hidden plan can't be the most popular one.",
         );
       }
 
@@ -197,9 +205,10 @@ export class PlanService {
         input.durationDays !== undefined && input.durationDays !== plan.durationDays;
       const billingChanged = priceChanged || durationChanged;
 
-      const carriesHistory =
-        (await this.planRepository.hasPayments(plan.id, manager)) ||
-        (await this.planRepository.hasSubscribers(plan.id, manager));
+      // Only asked when it can actually change the outcome.
+      const carriesHistory = billingChanged
+        ? await this.planRepository.carriesHistory(plan.id, manager)
+        : false;
 
       // ── In-place edit ──────────────────────────────────────────────────────
       if (!billingChanged || !carriesHistory) {
@@ -214,6 +223,17 @@ export class PlanService {
         if (input.isPopular !== undefined) patch.isPopular = input.isPopular;
         if (nextPrice !== undefined) patch.price = nextPrice;
         if (input.durationDays !== undefined) patch.durationDays = input.durationDays;
+
+        // Sort order defaults to the duration on create. If it was never overridden and
+        // the duration changes, carry it across — otherwise editing a 30-day plan to 365
+        // days leaves it sorted as if it were still 30, with no way to notice.
+        if (
+          input.sortOrder === undefined &&
+          input.durationDays !== undefined &&
+          plan.sortOrder === plan.durationDays
+        ) {
+          patch.sortOrder = input.durationDays;
+        }
 
         await this.planRepository.update(plan.id, patch, manager);
         if (patch.isPopular) await this.clearOtherPopular(plan.id, manager);
@@ -245,10 +265,19 @@ export class PlanService {
             input.description !== undefined ? input.description?.trim() || null : plan.description,
           durationDays: input.durationDays ?? plan.durationDays,
           price: nextPrice ?? plan.price,
+          // Deliberately inherits the predecessor's currency rather than the current
+          // platform setting: the successor is a reprice of the same product, and a
+          // currency switch is blocked while sellable plans exist in the old one.
           currency: plan.currency,
           isActive: plan.isActive,
           isPopular: input.isPopular ?? plan.isPopular,
-          sortOrder: input.sortOrder ?? plan.sortOrder,
+          // Same reasoning as the in-place branch — keep an auto-derived sort order in
+          // step with a changed duration.
+          sortOrder:
+            input.sortOrder ??
+            (input.durationDays !== undefined && plan.sortOrder === plan.durationDays
+              ? input.durationDays
+              : plan.sortOrder),
           supersedes: { id: plan.id } as Plan,
         } as Partial<Plan>,
         manager,
