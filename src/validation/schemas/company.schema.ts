@@ -89,3 +89,18 @@ export const customerIdParamSchema = Joi.object({
 export const purchaseIdParamSchema = Joi.object({
   purchaseId: commonPatterns.uuid.required(),
 }).required();
+
+/**
+ * `format` only. No pagination: a bulk export is deliberately exempt (see
+ * be-endpoints.md), because a customer taking their data must get all of it, and
+ * paginating would turn "download and leave" into a scripted loop.
+ */
+export const exportQuerySchema = Joi.object({
+  format: Joi.string().valid("csv", "json").default("csv").messages({
+    "any.only": "Choose either CSV or JSON.",
+  }),
+});
+
+export interface ExportQueryInput {
+  format: "csv" | "json";
+}
