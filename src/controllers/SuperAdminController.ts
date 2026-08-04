@@ -1,5 +1,11 @@
 import type { NextFunction, Request, Response } from "express";
 import { BaseController } from "@/controllers/BaseController";
+import type {
+  ExtendTrialInput,
+  ReleaseTrialIdentityInput,
+  SetCompInput,
+} from "@/validation/schemas/admin.schema";
+import type { TrialIdentity } from "@/entities/TrialIdentity";
 import { SuperAdminService } from "@/services/SuperAdminService";
 import { PlanService } from "@/services/PlanService";
 import { SettingsService } from "@/services/SettingsService";
@@ -134,4 +140,65 @@ export class SuperAdminController extends BaseController {
     if (!req.user) throw UnauthorizedError("Admin context missing");
     return { id: req.user.id, email: req.user.email };
   }
+
+  extendTrial = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { companyId } = req.params as { companyId: string };
+      const { days } = req.body as ExtendTrialInput;
+      const result = await this.service.extendTrial(companyId, days, req.user!.id);
+      return {
+        data: result,
+        message: `Trial extended. It now runs until ${result.trialEndsAt.toISOString().slice(0, 10)}.`,
+      };
+    });
+  };
+
+  setComp = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { companyId } = req.params as { companyId: string };
+      const input = req.body as SetCompInput;
+      const result = await this.service.setComp(
+        companyId,
+        {
+          isComped: input.isComped,
+          compedUntil: input.compedUntil ?? null,
+          reason: input.reason ?? null,
+        },
+        req.user!.id,
+      );
+      return {
+        data: result,
+        message: input.isComped ? "Complimentary access granted." : "Complimentary access removed.",
+      };
+    });
+  };
+
+  listTrialIdentities = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { companyId } = req.params as { companyId: string };
+      const identities = await this.service.listTrialIdentities(companyId);
+      return {
+        // Only the masked preview leaves the server. The stored value is an HMAC and
+        // cannot be reversed, but the preview is what support actually needs, and
+        // returning less is the right default for a table of contact details.
+        data: identities.map((i: TrialIdentity) => ({
+          id: i.id,
+          type: i.identifierType,
+          preview: i.identifierPreview,
+          claimedAt: i.claimedAt,
+          releasedAt: i.releasedAt,
+          releaseReason: i.releaseReason,
+        })),
+      };
+    });
+  };
+
+  releaseTrialIdentity = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { identityId } = req.params as { identityId: string };
+      const { reason } = req.body as ReleaseTrialIdentityInput;
+      await this.service.releaseTrialIdentity(identityId, reason, req.user!.id);
+      return { data: null, message: "That identifier can be used for a free trial again." };
+    });
+  };
 }

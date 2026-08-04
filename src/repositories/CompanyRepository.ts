@@ -1,7 +1,7 @@
 import type { EntityManager, Repository } from "typeorm";
 import { AppDataSource } from "data-source";
 import { returningRows } from "@/utils/db";
-import { Company } from "@/entities/Company";
+import { Company, type SubscriptionStatus } from "@/entities/Company";
 
 export type CompanyStatusFilter = "all" | "active" | "inactive";
 export type CompanyBusinessTypeFilter = "all" | "fuel_station" | "shop";
@@ -148,10 +148,86 @@ export class CompanyRepository {
     );
   }
 
-  async setActivated(companyId: string, manager?: EntityManager): Promise<void> {
+  /**
+   * Lifts an admin ban. **Does not grant access** — that is the caller's job, using
+   * `computeEntitlement`.
+   *
+   * This used to set `isActive: true` unconditionally. Once `isActive` came to mean
+   * "currently entitled to operate", that turned "un-ban this company" into "give this
+   * company a free subscription": reactivating an expired account handed it a working
+   * dashboard and a live QR code without any payment, until the hourly cron happened to
+   * notice and switch it back off.
+   */
+  async clearDeactivation(companyId: string, manager?: EntityManager): Promise<void> {
     await this.getRepo(manager).update(
       { id: companyId },
-      { isActive: true, deactivatedAt: null, deactivatedBy: null },
+      { deactivatedAt: null, deactivatedBy: null },
+    );
+  }
+
+  /** Writes the entitlement projection for one company. */
+  async setEntitlementState(
+    companyId: string,
+    state: { isActive: boolean; subscriptionStatus: SubscriptionStatus },
+    manager?: EntityManager,
+  ): Promise<void> {
+    await this.getRepo(manager).update({ id: companyId }, state);
+  }
+
+  /**
+   * Grants or extends a free trial.
+   *
+   * Stacks onto whatever trial time is left rather than overwriting it, using the same
+   * GREATEST(COALESCE(...)) shape as `extendSubscription` — an admin adding three days
+   * to a trial with two left means five, not three.
+   *
+   * `trial_started_at` is only set if it was null, so extending does not restate when
+   * the trial began and break conversion analytics.
+   */
+  async extendTrial(
+    params: { companyId: string; days: number; now: Date },
+    manager?: EntityManager,
+  ): Promise<Date> {
+    const result = await (manager ?? AppDataSource.manager).query(
+      `UPDATE "companies"
+          SET "trial_started_at" = COALESCE("trial_started_at", $2::timestamptz),
+              "trial_ends_at" =
+                GREATEST(COALESCE("trial_ends_at", $2::timestamptz), $2::timestamptz)
+                + make_interval(days => $3::int)
+        WHERE "id" = $1 AND "deleted_at" IS NULL
+        RETURNING "trial_ends_at"`,
+      [params.companyId, params.now, params.days],
+    );
+    const row = returningRows<{ trial_ends_at: Date }>(result)[0];
+    if (!row) throw new Error(`extendTrial: company ${params.companyId} not found`);
+    return row.trial_ends_at;
+  }
+
+  /**
+   * Sets or clears the admin comp — the one state that means unlimited access.
+   *
+   * A reason is required by the service, not defaulted here: comping is a money
+   * decision, and an unexplained one is indistinguishable from a mistake six months
+   * later.
+   */
+  async setComp(
+    params: {
+      companyId: string;
+      isComped: boolean;
+      compedUntil: Date | null;
+      reason: string | null;
+      grantedByUserId: string | null;
+    },
+    manager?: EntityManager,
+  ): Promise<void> {
+    await this.getRepo(manager).update(
+      { id: params.companyId },
+      {
+        isComped: params.isComped,
+        compedUntil: params.compedUntil,
+        compReason: params.reason,
+        compGrantedBy: params.grantedByUserId ? ({ id: params.grantedByUserId } as never) : null,
+      },
     );
   }
 

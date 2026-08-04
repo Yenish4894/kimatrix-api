@@ -5,6 +5,10 @@ import { validateRequest, ValidationTarget } from "@/middleware/validation";
 import {
   companyIdParamSchema,
   createPlanSchema,
+  extendTrialSchema,
+  releaseTrialIdentitySchema,
+  setCompSchema,
+  trialIdentityIdParamSchema,
   listCompaniesQuerySchema,
   planIdParamSchema,
   setPlanActiveSchema,
@@ -78,6 +82,39 @@ router.patch(
   "/settings",
   validateRequest(updateSettingsSchema, ValidationTarget.BODY),
   controller.updateSettings,
+);
+
+// ─── Subscription / trial administration ────────────────────────────────────
+//
+// All of these write the entitlement projection themselves rather than waiting for the
+// hourly cron, so the admin sees the result of their own action immediately instead of
+// a stale badge.
+router.post(
+  "/companies/:companyId/trial/extend",
+  validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  validateRequest(extendTrialSchema, ValidationTarget.BODY),
+  controller.extendTrial,
+);
+
+router.patch(
+  "/companies/:companyId/comp",
+  validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  validateRequest(setCompSchema, ValidationTarget.BODY),
+  controller.setComp,
+);
+
+router.get(
+  "/companies/:companyId/trial-identities",
+  validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  controller.listTrialIdentities,
+);
+
+// The safety valve for a burned identifier. See SuperAdminService.releaseTrialIdentity.
+router.post(
+  "/trial-identities/:identityId/release",
+  validateRequest(trialIdentityIdParamSchema, ValidationTarget.PARAMS),
+  validateRequest(releaseTrialIdentitySchema, ValidationTarget.BODY),
+  controller.releaseTrialIdentity,
 );
 
 export default router;

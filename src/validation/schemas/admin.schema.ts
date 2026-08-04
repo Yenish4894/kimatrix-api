@@ -132,3 +132,63 @@ export interface UpdateSettingsBody {
   trialDurationDays?: number;
   platformCurrency?: string;
 }
+
+// ─── Subscription / trial administration ────────────────────────────────────
+
+export const extendTrialSchema = Joi.object({
+  // Bounded at a year. An unbounded value is a typo away from a perpetual free
+  // account, and a perpetual free account is what `isComped` is for — it is explicit,
+  // it records who granted it and why, and it shows up in the comp report.
+  days: Joi.number().integer().min(1).max(365).required().messages({
+    "number.max":
+      "Grant at most 365 days. For permanent free access, use complimentary access instead.",
+    "any.required": "How many days should the trial run for?",
+  }),
+});
+
+export const setCompSchema = Joi.object({
+  isComped: Joi.boolean().strict().required(),
+  // Required when granting, ignored when revoking. Enforced here AND in the service:
+  // the service is the one that runs for any future caller that skips this schema.
+  reason: Joi.string()
+    .trim()
+    .max(255)
+    .when("isComped", {
+      is: true,
+      then: Joi.required().messages({
+        "any.required": "Please give a reason for this complimentary access.",
+        "string.empty": "Please give a reason for this complimentary access.",
+      }),
+      otherwise: Joi.optional().allow(null, ""),
+    }),
+  // Null means perpetual. Deliberately allowed — some accounts genuinely are free
+  // forever — but it is the caller's explicit choice, never a default.
+  compedUntil: Joi.date().iso().greater("now").allow(null).optional().messages({
+    "date.greater": "Choose a date in the future.",
+  }),
+});
+
+export const releaseTrialIdentitySchema = Joi.object({
+  reason: Joi.string().trim().min(3).max(255).required().messages({
+    "any.required": "Please give a reason for releasing this identifier.",
+    "string.empty": "Please give a reason for releasing this identifier.",
+  }),
+});
+
+export const trialIdentityIdParamSchema = Joi.object({
+  identityId: commonPatterns.uuid.required(),
+});
+
+export interface ExtendTrialInput {
+  days: number;
+}
+
+export interface SetCompInput {
+  isComped: boolean;
+  reason?: string | null;
+  compedUntil?: Date | null;
+}
+
+export interface ReleaseTrialIdentityInput {
+  reason: string;
+}
