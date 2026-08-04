@@ -11,7 +11,7 @@ import type {
   CustomerSortField,
   SortOrder,
 } from "@/repositories/CustomerRepository";
-import { PurchaseRepository } from "@/repositories/PurchaseRepository";
+import { PurchaseRepository, type MonthlyTotals } from "@/repositories/PurchaseRepository";
 import type { PurchaseSortField } from "@/repositories/PurchaseRepository";
 import type { UpdateProfileInput } from "@/validation/schemas/company.schema";
 
@@ -83,6 +83,22 @@ export interface ListPurchasesQuery {
   to?: Date;
   sortBy?: PurchaseSortField;
   sortOrder?: SortOrder;
+}
+
+export interface MonthlyReport {
+  from: Date;
+  to: Date;
+  totals: MonthlyTotals;
+  topCustomers: {
+    customerId: string;
+    fullName: string;
+    mobile: string;
+    vehicleNumber: string | null;
+    /** String, not number — numeric(14,2) through a float loses cents. */
+    totalSpend: string;
+    purchaseCount: number;
+    lastActivity: Date;
+  }[];
 }
 
 export class CompanyService {
@@ -217,5 +233,37 @@ export class CompanyService {
   private buildQrUrl(qrToken: string): string {
     const base = config.FRONTEND_BASE_URL.replace(/\/$/, "");
     return `${base}/qr/${qrToken}`;
+  }
+
+  /**
+   * Monthly report for one calendar month, aggregated in the database.
+   *
+   * The month window is built as [first of month, first of next month) — a half-open
+   * range, not `BETWEEN`. `BETWEEN` on a timestamp includes the upper bound, so a
+   * purchase landing exactly at midnight on the 1st would be counted in both months.
+   */
+  async getMonthlyReport(companyId: string, year: number, month: number): Promise<MonthlyReport> {
+    const from = new Date(Date.UTC(year, month - 1, 1));
+    const to = new Date(Date.UTC(year, month, 1));
+    const { totals, topCustomers } = await this.purchaseRepository.getMonthlyReport({
+      companyId,
+      from,
+      to,
+    });
+
+    return {
+      from,
+      to,
+      totals,
+      topCustomers: topCustomers.map((r) => ({
+        customerId: r.customer_id,
+        fullName: r.full_name,
+        mobile: r.mobile,
+        vehicleNumber: r.vehicle_number,
+        totalSpend: r.total_spend,
+        purchaseCount: r.purchase_count,
+        lastActivity: r.last_activity,
+      })),
+    };
   }
 }

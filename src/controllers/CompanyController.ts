@@ -5,6 +5,7 @@ import { UnauthorizedError } from "@/errors/index";
 import type {
   ListCustomersQueryInput,
   ListPurchasesQueryInput,
+  MonthlyReportQueryInput,
   UpdateProfileInput,
 } from "@/validation/schemas/company.schema";
 
@@ -83,6 +84,15 @@ export class CompanyController extends BaseController {
       const purchaseId = req.params["purchaseId"] as string;
       const purchase = await this.companyService.getPurchase(company.id, purchaseId);
       return { data: purchase };
+    });
+  };
+
+  getMonthlyReport = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const company = req.company;
+      if (!company) throw UnauthorizedError("Company context missing");
+      const { year, month } = req.query as unknown as MonthlyReportQueryInput;
+      return { data: await this.companyService.getMonthlyReport(company.id, year, month) };
     });
   };
 }

@@ -8,6 +8,7 @@ import {
   customerIdParamSchema,
   listCustomersQuerySchema,
   listPurchasesQuerySchema,
+  monthlyReportQuerySchema,
   purchaseIdParamSchema,
   exportQuerySchema,
   updateProfileSchema,
@@ -78,6 +79,15 @@ router.get(
   validateRequest(listPurchasesQuerySchema, ValidationTarget.QUERY),
   controller.listPurchases,
 );
+// Aggregated server-side. Replaces a client loop that pulled every purchase in the
+// month, 100 rows at a time, sequentially, to sum them in the browser.
+router.get(
+  "/reports/monthly",
+  requireActiveSubscription,
+  validateRequest(monthlyReportQuerySchema, ValidationTarget.QUERY),
+  controller.getMonthlyReport,
+);
+
 router.get(
   "/purchases/:purchaseId",
   requireActiveSubscription,
