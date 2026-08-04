@@ -68,7 +68,6 @@ export const updateProfileSchema = Joi.object({
   promoEmailOptIn: Joi.boolean().optional(),
 })
   .min(1)
-  .strict()
   .required();
 
 export interface UpdateProfileInput {
@@ -85,12 +84,8 @@ export interface UpdateProfileInput {
 
 export const customerIdParamSchema = Joi.object({
   customerId: commonPatterns.uuid.required(),
-})
-  .strict()
-  .required();
+}).required();
 
 export const purchaseIdParamSchema = Joi.object({
   purchaseId: commonPatterns.uuid.required(),
-})
-  .strict()
-  .required();
+}).required();

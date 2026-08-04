@@ -16,9 +16,7 @@ export const qrTokenParamSchema = Joi.object({
       "string.pattern.base": "QR code is invalid.",
       "any.required": "QR code is invalid or missing.",
     }),
-})
-  .strict()
-  .required();
+}).required();
 
 export const submitPurchaseSchema = Joi.object({
   mobile: commonPatterns.phoneE164.required(),
@@ -34,9 +32,7 @@ export const submitPurchaseSchema = Joi.object({
   latitude: Joi.number().min(-90).max(90).optional(),
   longitude: Joi.number().min(-180).max(180).optional(),
   locationAccuracy: Joi.number().min(0).max(100_000_000).optional(),
-})
-  .strict()
-  .required();
+}).required();
 
 export interface SubmitPurchaseInput {
   mobile: string;

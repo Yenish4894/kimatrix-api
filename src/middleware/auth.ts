@@ -38,6 +38,22 @@ export async function authMiddleware(
       throw UnauthorizedError("Account is inactive");
     }
 
+    // Reject access tokens minted before the password was last changed.
+    //
+    // Changing a password (or completing a reset) revokes every REFRESH token, but
+    // access tokens live for JWT_EXPIRES_IN — 24h by default. Without this check, a
+    // user who changes their password precisely because they've been compromised
+    // leaves the attacker with full authenticated access for the rest of that window:
+    // dashboard, customer PII, profile edits, payment routes.
+    //
+    // Both values are already loaded on every request; they simply weren't compared.
+    // One second of slack absorbs the truncation in the JWT's second-resolution `iat`.
+    if (user.passwordChangedAt && typeof payload.iat === "number") {
+      if (payload.iat * 1000 < user.passwordChangedAt.getTime() - 1000) {
+        throw UnauthorizedError("Session invalidated. Please log in again.");
+      }
+    }
+
     req.user = user;
     next();
   } catch (err) {

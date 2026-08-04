@@ -3,10 +3,10 @@ import { config } from "@/config/index";
 import { logger } from "@/utils/logger";
 import { PlanRepository } from "@/repositories/PlanRepository";
 import { PaymentRepository } from "@/repositories/PaymentRepository";
+import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { PaypalService } from "@/services/PaypalService";
-import { BadRequestError, NotFoundError } from "@/errors/index";
+import { BadRequestError, ConflictError, NotFoundError } from "@/errors/index";
 import type { Plan } from "@/entities/Plan";
-import { Company } from "@/entities/Company";
 
 export interface PlanDto {
   id: string;
@@ -35,6 +35,7 @@ export interface CapturePaymentResult {
 export class PaymentService {
   private planRepository = new PlanRepository();
   private paymentRepository = new PaymentRepository();
+  private companyRepository = new CompanyRepository();
   private paypalService = new PaypalService();
 
   async getPlans(): Promise<PlanDto[]> {
@@ -90,17 +91,82 @@ export class PaymentService {
       };
     }
 
-    return AppDataSource.transaction(async (manager) => {
-      // Pessimistic write lock — prevents concurrent requests from both calling PayPal capture
-      const payment = await this.paymentRepository.findByPaypalOrderIdForUpdate(
-        paypalOrderId,
-        manager,
+    // ── 1. Claim the row atomically: pending -> capturing. ────────────────────
+    // Only one caller can win this transition, which is what previously required
+    // holding a row lock across the whole PayPal round trip.
+    const claimed = await this.paymentRepository.claimForCapture(paypalOrderId, companyId);
+    if (!claimed) {
+      // Re-read to produce a precise error rather than a generic one.
+      const current = await this.paymentRepository.findByPaypalOrderId(paypalOrderId);
+      if (!current || current.company.id !== companyId) throw NotFoundError("Payment not found.");
+      if (current.status === "captured") {
+        return {
+          paymentId: current.id,
+          subscriptionStartsAt: current.subscriptionStartsAt!,
+          subscriptionEndsAt: current.subscriptionEndsAt!,
+        };
+      }
+      if (current.status === "capturing") {
+        throw ConflictError("This payment is already being processed. Please wait a moment.");
+      }
+      throw BadRequestError("This payment cannot be captured.");
+    }
+
+    // ── 2. Network I/O, holding NO database connection. ───────────────────────
+    // This call takes up to 15s. Inside a transaction it pinned one of only ten pool
+    // connections for the duration, and an abort AFTER PayPal debited the buyer rolled
+    // the row back to `pending` — money taken, nothing granted.
+    let capture: Awaited<ReturnType<PaypalService["captureOrder"]>>;
+    try {
+      capture = await this.paypalService.captureOrder(paypalOrderId);
+    } catch (err) {
+      // Deliberately left in `capturing`, NOT `failed`: PayPal may well have taken the
+      // money and we simply never heard back. The webhook finalizes it, and it would
+      // skip a row we had marked failed.
+      logger.error(
+        { err, paypalOrderId, companyId },
+        "Capture request failed after claim — payment left in `capturing` for webhook reconciliation",
       );
+      throw err;
+    }
 
+    const captureUnit = capture.purchase_units?.[0]?.payments?.captures?.[0];
+    if (!captureUnit || captureUnit.status !== "COMPLETED") {
+      // PayPal answered and told us it did NOT complete — safe to mark failed.
+      await this.paymentRepository.updateStatus(
+        claimed.id,
+        "failed",
+        capture as unknown as Record<string, unknown>,
+      );
+      throw BadRequestError("Payment was not completed by PayPal.");
+    }
+
+    // ── 3. Short transaction to persist. ──────────────────────────────────────
+    const result = await this.finalizeCapture(
+      claimed.id,
+      capture as unknown as Record<string, unknown>,
+    );
+    logger.info(
+      { companyId, paypalOrderId, subscriptionEndsAt: result.subscriptionEndsAt },
+      "Payment captured, company activated",
+    );
+    return result;
+  }
+
+  /**
+   * Persist a confirmed capture and extend the subscription. Idempotent, locked, and
+   * shared by both the synchronous capture path and the webhook so the two cannot
+   * interleave and double-apply.
+   */
+  private async finalizeCapture(
+    paymentId: string,
+    paypalResponse: Record<string, unknown>,
+  ): Promise<CapturePaymentResult> {
+    return AppDataSource.transaction(async (manager) => {
+      const payment = await this.paymentRepository.findByIdForUpdate(paymentId, manager);
       if (!payment) throw NotFoundError("Payment not found.");
-      if (payment.company.id !== companyId) throw NotFoundError("Payment not found.");
 
-      // Re-check inside the lock (another request may have captured while we waited)
+      // Re-check under the lock — the other path may have finalized while we waited.
       if (payment.status === "captured") {
         return {
           paymentId: payment.id,
@@ -108,29 +174,18 @@ export class PaymentService {
           subscriptionEndsAt: payment.subscriptionEndsAt!,
         };
       }
-      if (payment.status !== "pending") {
-        throw BadRequestError("This payment cannot be captured.");
-      }
-
-      const capture = await this.paypalService.captureOrder(paypalOrderId);
-
-      const captureUnit = capture.purchase_units?.[0]?.payments?.captures?.[0];
-      if (!captureUnit || captureUnit.status !== "COMPLETED") {
-        await this.paymentRepository.updateStatus(
-          payment.id,
-          "failed",
-          capture as unknown as Record<string, unknown>,
-          manager,
-        );
-        throw BadRequestError("Payment was not completed by PayPal.");
-      }
 
       const now = new Date();
-      const { subscriptionStartsAt, subscriptionEndsAt } = this.computeSubscriptionDates(
-        payment.plan,
-        payment.company.subscriptionExpiresAt,
-        now,
-      );
+      const { subscriptionStartsAt, subscriptionEndsAt } =
+        await this.companyRepository.extendSubscription(
+          {
+            companyId: payment.company.id,
+            planId: payment.plan.id,
+            durationDays: payment.plan.durationDays,
+            now,
+          },
+          manager,
+        );
 
       await this.paymentRepository.updateCaptured(
         payment.id,
@@ -139,22 +194,9 @@ export class PaymentService {
           capturedAt: now,
           subscriptionStartsAt,
           subscriptionEndsAt,
-          paypalResponse: capture as unknown as Record<string, unknown>,
+          paypalResponse,
         },
         manager,
-      );
-
-      await manager.getRepository(Company).update(companyId, {
-        isActive: true,
-        currentPlan: { id: payment.plan.id } as never,
-        subscriptionExpiresAt: subscriptionEndsAt,
-        deactivatedAt: null,
-        deactivatedBy: null,
-      });
-
-      logger.info(
-        { companyId, paypalOrderId, subscriptionEndsAt },
-        "Payment captured, company activated",
       );
 
       return { paymentId: payment.id, subscriptionStartsAt, subscriptionEndsAt };
@@ -202,43 +244,22 @@ export class PaymentService {
 
     const payment = await this.paymentRepository.findByPaypalOrderId(orderId);
     if (!payment) {
-      logger.warn({ orderId }, "PayPal webhook: payment record not found");
-      return;
+      // THROW, don't return. PayPal is telling us it captured an order we have no
+      // record of — capture and webhook disagree, and this is the exact case the
+      // webhook exists to catch. Throwing makes the controller answer 5xx so PayPal
+      // retries; returning here silently discarded the only signal we get.
+      throw NotFoundError(`PayPal webhook: no payment record for order ${orderId}`);
     }
 
     if (payment.status === "captured") return; // idempotent
 
-    const now = new Date();
-    const { subscriptionStartsAt, subscriptionEndsAt } = this.computeSubscriptionDates(
-      payment.plan,
-      payment.company.subscriptionExpiresAt,
-      now,
-    );
-
-    await AppDataSource.transaction(async (manager) => {
-      await this.paymentRepository.updateCaptured(
-        payment.id,
-        {
-          status: "captured",
-          capturedAt: now,
-          subscriptionStartsAt,
-          subscriptionEndsAt,
-          paypalResponse: event,
-        },
-        manager,
-      );
-
-      await manager.getRepository(Company).update(payment.company.id, {
-        isActive: true,
-        currentPlan: { id: payment.plan.id } as never,
-        subscriptionExpiresAt: subscriptionEndsAt,
-        deactivatedAt: null,
-        deactivatedBy: null,
-      });
-    });
+    // Same locked, atomic path the synchronous capture uses. Previously this did its
+    // own unlocked read-compute-write, so a webhook arriving mid-capture could apply a
+    // second subscription extension on top of the one being written.
+    const result = await this.finalizeCapture(payment.id, event);
 
     logger.info(
-      { orderId, companyId: payment.company.id, subscriptionEndsAt },
+      { orderId, companyId: payment.company.id, subscriptionEndsAt: result.subscriptionEndsAt },
       "PayPal webhook: company activated via webhook",
     );
   }

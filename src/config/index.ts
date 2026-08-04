@@ -18,6 +18,9 @@ export const config = {
   DB_PASSWORD: process.env["DB_PASSWORD"] ?? "",
   DB_NAME: process.env["DB_NAME"] ?? "sena_temp_dev",
   DB_SSL: parseBool(process.env["DB_SSL"]),
+  // PEM for a provider using a private CA. Certificate validation is always ON when
+  // DB_SSL is set; this is how you supply the root when it isn't publicly trusted.
+  DB_CA_CERT: process.env["DB_CA_CERT"] ?? "",
 
   JWT_SECRET: process.env["JWT_SECRET"] ?? "",
   JWT_REFRESH_SECRET: process.env["JWT_REFRESH_SECRET"] ?? "",

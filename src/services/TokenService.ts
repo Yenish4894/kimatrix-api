@@ -10,6 +10,12 @@ export interface AccessTokenPayload {
   sub: string;
   userType: UserType;
   companyId?: string;
+  /**
+   * Issued-at, in seconds. Set by jsonwebtoken automatically on sign; declared here so
+   * `authMiddleware` can compare it against `users.password_changed_at` and reject
+   * tokens minted before the password was changed.
+   */
+  iat?: number;
 }
 
 export interface IssuedTokens {

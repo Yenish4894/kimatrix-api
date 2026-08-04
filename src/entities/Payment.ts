@@ -3,7 +3,24 @@ import { BaseEntity } from "./BaseEntity";
 import { Company } from "./Company";
 import { Plan } from "./Plan";
 
-export const PAYMENT_STATUSES = ["pending", "captured", "failed", "cancelled"] as const;
+/**
+ * `capturing` is the in-flight state: this row has been claimed and a capture request
+ * is with PayPal, or was and we never learned the outcome.
+ *
+ * It exists so the capture HTTP call can happen OUTSIDE a database transaction. A row
+ * left in `capturing` means "money may have moved but we have no confirmation" — it is
+ * deliberately NOT marked `failed`, because the webhook is the reconciliation path and
+ * would skip a failed row.
+ *
+ * No DB CHECK constraint on this column, so adding a value needs no migration.
+ */
+export const PAYMENT_STATUSES = [
+  "pending",
+  "capturing",
+  "captured",
+  "failed",
+  "cancelled",
+] as const;
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 
 @Entity("payments")

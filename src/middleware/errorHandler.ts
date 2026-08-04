@@ -133,6 +133,43 @@ export function errorHandler(err: Error, req: Request, res: Response, _next: Nex
     return;
   }
 
+  // body-parser rejections (malformed JSON, oversized payload, bad charset) arrive here
+  // as plain Errors carrying a `type` and their own `status`. Without this branch they
+  // fell through to the catch-all and every one of them was reported as a 500 —
+  // so a customer whose keyboard produced a stray character on the QR form was told
+  // the server had broken, and our own error rate counted client mistakes as outages.
+  const bodyParserError = err as Error & { type?: string; status?: number; statusCode?: number };
+  const bodyParserStatus = bodyParserError.status ?? bodyParserError.statusCode;
+  if (
+    typeof bodyParserError.type === "string" &&
+    typeof bodyParserStatus === "number" &&
+    bodyParserStatus >= 400 &&
+    bodyParserStatus < 500
+  ) {
+    const { message, code } =
+      bodyParserError.type === "entity.too.large"
+        ? {
+            message: "That request was too large. Please reduce the amount of data and try again.",
+            code: "PAYLOAD_TOO_LARGE",
+          }
+        : {
+            message: "We couldn't read that request. Please try again.",
+            code: "MALFORMED_REQUEST",
+          };
+    reqLogger.warn(
+      { type: bodyParserError.type, status: bodyParserStatus },
+      "Malformed request body",
+    );
+    res.status(bodyParserStatus).json({
+      success: false,
+      message,
+      error: code,
+      requestId,
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
+
   if (err instanceof QueryFailedError) {
     const pgError = err as QueryFailedError & { code?: string; detail?: string };
     if (pgError.code === "23505") {

@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { PaymentController } from "@/controllers/PaymentController";
 import { companyMiddleware } from "@/middleware/auth";
+import { validateRequest, ValidationTarget } from "@/middleware/validation";
+import { captureOrderSchema, createOrderSchema } from "@/validation/schemas/payment.schema";
 
 const router = Router();
 const controller = new PaymentController();
@@ -13,8 +15,18 @@ router.get("/plans", controller.getPlans);
 // required here: pending, expired and lapsed-trial companies are exactly the ones who
 // need to pay. (This previously needed a separate `billingCompanyMiddleware`; once
 // companyMiddleware stopped enforcing `isActive` the two became identical.)
-router.post("/paypal/create-order", companyMiddleware, controller.createOrder);
-router.post("/paypal/capture-order", companyMiddleware, controller.captureOrder);
+router.post(
+  "/paypal/create-order",
+  companyMiddleware,
+  validateRequest(createOrderSchema, ValidationTarget.BODY),
+  controller.createOrder,
+);
+router.post(
+  "/paypal/capture-order",
+  companyMiddleware,
+  validateRequest(captureOrderSchema, ValidationTarget.BODY),
+  controller.captureOrder,
+);
 
 // public — PayPal-signed webhook (no auth, raw body preserved via app.ts verify callback)
 router.post("/paypal/webhook", controller.webhook);

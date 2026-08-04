@@ -93,11 +93,23 @@ export class TokenRepository {
       .execute();
   }
 
-  async revokeRefreshToken(id: string, manager?: EntityManager): Promise<void> {
-    await this.getRepo(manager).update(
+  /**
+   * @returns true if THIS caller performed the revocation.
+   *
+   * The return value is load-bearing. Two requests presenting the same refresh token
+   * concurrently both read `revoked_at IS NULL` under READ COMMITTED, so neither takes
+   * the reuse-detection branch. The first UPDATE matches; the second blocks, re-checks
+   * the predicate after the first commits, and matches zero rows. Discarding that
+   * meant the loser still got a full token pair — so an attacker racing the legitimate
+   * client got a valid session, and the "reuse detected → revoke everything" defence
+   * never fired.
+   */
+  async revokeRefreshToken(id: string, manager?: EntityManager): Promise<boolean> {
+    const result = await this.getRepo(manager).update(
       { id, type: "refresh", revokedAt: IsNull() },
       { revokedAt: new Date() },
     );
+    return (result.affected ?? 0) === 1;
   }
 
   async consumePasswordResetToken(id: string, manager?: EntityManager): Promise<void> {

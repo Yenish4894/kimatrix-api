@@ -23,9 +23,7 @@ export interface ListCompaniesQueryInput {
 
 export const companyIdParamSchema = Joi.object({
   companyId: commonPatterns.uuid.required(),
-})
-  .strict()
-  .required();
+}).required();
 
 // ─── Plan management ───────────────────────────────────────────
 
@@ -63,9 +61,7 @@ export const createPlanSchema = Joi.object({
   isPopular: Joi.boolean().optional(),
   isActive: Joi.boolean().optional(),
   sortOrder: Joi.number().integer().min(0).max(9999).optional(),
-})
-  .strict()
-  .required();
+}).required();
 
 export interface CreatePlanBody {
   name: string;
@@ -86,7 +82,6 @@ export const updatePlanSchema = Joi.object({
   sortOrder: Joi.number().integer().min(0).max(9999).optional(),
 })
   .min(1)
-  .strict()
   .required()
   .messages({ "object.min": "Change at least one field." });
 
@@ -101,17 +96,13 @@ export interface UpdatePlanBody {
 
 export const planIdParamSchema = Joi.object({
   planId: commonPatterns.uuid.required(),
-})
-  .strict()
-  .required();
+}).required();
 
 export const setPlanActiveSchema = Joi.object({
   isActive: Joi.boolean().required().messages({
     "any.required": "Specify whether the plan should be available.",
   }),
-})
-  .strict()
-  .required();
+}).required();
 
 // ─── Platform settings ─────────────────────────────────────────
 
@@ -122,11 +113,11 @@ export const updateSettingsSchema = Joi.object({
     "number.min": "The trial must run for at least one day.",
     "number.max": "The trial cannot be longer than 90 days.",
   }),
-  // Deliberately NOT .uppercase()/.trim() here. Object-level `.strict()` sets
-  // convert:false for the whole schema, which turns those from transforms into
-  // assertions — "zar" would be rejected with "must only contain uppercase
-  // characters" instead of being normalized. SettingsService does the normalizing.
+  // Case-insensitive by pattern; SettingsService uppercases and validates against the
+  // supported list. (The object-level `.strict()` that originally forced this shape has
+  // been removed — see the note at the top of auth.schema.ts.)
   platformCurrency: Joi.string()
+    .trim()
     .pattern(/^[A-Za-z]{3}$/)
     .optional()
     .messages({
@@ -134,7 +125,6 @@ export const updateSettingsSchema = Joi.object({
     }),
 })
   .min(1)
-  .strict()
   .required()
   .messages({ "object.min": "Change at least one setting." });
 

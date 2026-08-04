@@ -53,10 +53,25 @@ export class PaymentController extends BaseController {
 
       const rawBody = req.rawBody?.toString("utf8") ?? JSON.stringify(req.body);
       await paymentService.handleWebhook(headers, rawBody);
+      // 2xx = "we have taken responsibility for this event".
+      res.status(200).json({ received: true });
     } catch (err) {
-      logger.error({ err }, "PayPal webhook handler threw unexpectedly");
+      // 5xx = "we failed to process it, please send it again."
+      //
+      // This previously answered 200 unconditionally with the comment "PayPal retries
+      // on non-2xx" — which is true, and is exactly why swallowing the error was wrong.
+      // The webhook is the ONLY backstop for a capture that succeeded at PayPal but
+      // whose commit didn't land here, and there is no reconciliation job. A DB blip
+      // therefore discarded that event permanently: money taken, subscription never
+      // granted, and nothing to notice it.
+      //
+      // Note `handleWebhook` still returns early (2xx) for an invalid signature or an
+      // event type we don't handle — those are genuinely nothing to do, not failures.
+      logger.error(
+        { err, requestId: req.id },
+        "PayPal webhook processing failed — returning 5xx so PayPal retries",
+      );
+      res.status(500).json({ received: false });
     }
-    // always 200 — PayPal retries on non-2xx
-    res.status(200).json({ received: true });
   };
 }

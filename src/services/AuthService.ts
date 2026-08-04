@@ -1,11 +1,12 @@
 import type { EntityManager } from "typeorm";
 import { AppDataSource } from "data-source";
 import type { User } from "@/entities/User";
-import type { Company } from "@/entities/Company";
+import { Company } from "@/entities/Company";
 import { UserRepository } from "@/repositories/UserRepository";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { EmailService } from "@/services/EmailService";
 import { PasswordService } from "@/services/PasswordService";
+import { SettingsService } from "@/services/SettingsService";
 import { TokenService, type IssuedTokens } from "@/services/TokenService";
 import { config } from "@/config/index";
 import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from "@/errors/index";
@@ -73,9 +74,32 @@ export interface RefreshResult {
   tokens: IssuedTokens;
 }
 
+/**
+ * Internal marker, never surfaced to a caller.
+ *
+ * Reuse detection has to revoke every session the user holds — but it is raised from
+ * inside `AppDataSource.transaction`, and throwing there ROLLS BACK anything the same
+ * transaction just wrote. Revoking in place therefore looked correct in the code and
+ * did nothing at all: the stolen token was rejected, and every other token in the
+ * family, including the one the thief had just rotated into, stayed live. Verified by
+ * replaying a spent token and then successfully refreshing with its successor.
+ *
+ * So the transaction only *decides*; the revocation runs afterwards, in its own.
+ */
+class SessionReuseDetected extends Error {
+  constructor(
+    public readonly userId: string,
+    public readonly tokenId: string,
+    public readonly reason: string,
+  ) {
+    super("session reuse detected");
+  }
+}
+
 export class AuthService {
   private userRepository = new UserRepository();
   private companyRepository = new CompanyRepository();
+  private settingsService = new SettingsService();
   private passwordService = new PasswordService();
   private tokenService = new TokenService();
   private tokenRepository = new TokenRepository();
@@ -195,10 +219,12 @@ export class AuthService {
       ? await this.userRepository.findByEmailWithPassword(normalized)
       : await this.findUserByUsernameWithPassword(normalized);
 
-    if (!user) {
-      throw UnauthorizedError("Invalid credentials");
-    }
-    if (!user.isActive) {
+    // The message was already identical for all three failures, but the *timing* was
+    // not: skipping bcrypt when the account doesn't exist answered in a fraction of the
+    // time a real account takes, which enumerates our customer list just as effectively
+    // as a different error string would.
+    if (!user || !user.isActive) {
+      await this.passwordService.verifyAgainstDecoy(input.password);
       throw UnauthorizedError("Invalid credentials");
     }
 
@@ -247,6 +273,28 @@ export class AuthService {
   async refreshTokens(input: RefreshTokenInput, context: LoginContext): Promise<RefreshResult> {
     const tokenHash = this.tokenService.hashToken(input.refreshToken);
 
+    try {
+      return await this.rotateRefreshToken(tokenHash, context);
+    } catch (err) {
+      if (err instanceof SessionReuseDetected) {
+        // Fresh transaction — the one that detected this has already rolled back.
+        await AppDataSource.transaction((manager) =>
+          this.tokenRepository.revokeAllRefreshTokensForUser(err.userId, manager),
+        );
+        logger.warn(
+          { userId: err.userId, tokenId: err.tokenId, reason: err.reason },
+          "Refresh token reuse detected — all user sessions revoked",
+        );
+        throw UnauthorizedError("Session invalidated. Please log in again.");
+      }
+      throw err;
+    }
+  }
+
+  private async rotateRefreshToken(
+    tokenHash: string,
+    context: LoginContext,
+  ): Promise<RefreshResult> {
     return AppDataSource.transaction(async (manager) => {
       const tokenRow = await this.tokenRepository.findRefreshTokenByHash(tokenHash, manager);
       if (!tokenRow) {
@@ -254,12 +302,7 @@ export class AuthService {
       }
 
       if (tokenRow.revokedAt !== null) {
-        await this.tokenRepository.revokeAllRefreshTokensForUser(tokenRow.user.id, manager);
-        logger.warn(
-          { userId: tokenRow.user.id, tokenId: tokenRow.id },
-          "Refresh token reuse detected — all user sessions revoked",
-        );
-        throw UnauthorizedError("Session invalidated. Please log in again.");
+        throw new SessionReuseDetected(tokenRow.user.id, tokenRow.id, "reuse of a spent token");
       }
 
       if (tokenRow.expiresAt.getTime() <= Date.now()) {
@@ -271,7 +314,15 @@ export class AuthService {
         throw UnauthorizedError("User account is not available");
       }
 
-      await this.tokenRepository.revokeRefreshToken(tokenRow.id, manager);
+      // Whoever wins this UPDATE owns the rotation. A loser means another request
+      // already consumed this exact token — indistinguishable from reuse, and the
+      // check above cannot catch it because both requests read `revoked_at IS NULL`
+      // before either wrote. Without this, the loser was still issued a full token
+      // pair, which is precisely the theft scenario rotation exists to prevent.
+      const wonRotation = await this.tokenRepository.revokeRefreshToken(tokenRow.id, manager);
+      if (!wonRotation) {
+        throw new SessionReuseDetected(tokenRow.user.id, tokenRow.id, "concurrent double-spend");
+      }
 
       let companyId: string | undefined;
       let companyIsActive: boolean | undefined;
@@ -452,6 +503,38 @@ export class AuthService {
       if (!user.emailVerifiedAt) {
         await this.userRepository.markEmailVerified(user.id, manager);
         logger.info({ userId: user.id }, "Email verified");
+
+        // Start the free trial.
+        //
+        // The verification email states "your trial clock only starts once you
+        // confirm" — and nothing was writing these columns, so every new customer
+        // confirmed, was told their trial had begun, and landed on a paywall.
+        // `computeEntitlement` already handles the `trialing` state; only the stamp
+        // was missing.
+        //
+        // Guarded so it can only ever happen once per company, and never to someone
+        // who has already paid.
+        if (user.userType === "company") {
+          const company = await this.companyRepository.findByOwnerUserId(user.id, manager);
+          if (
+            company &&
+            company.trialStartedAt === null &&
+            company.subscriptionExpiresAt === null
+          ) {
+            const days = await this.settingsService.getTrialDurationDays(manager);
+            const now = new Date();
+            const trialEndsAt = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+            await manager.getRepository(Company).update(company.id, {
+              trialStartedAt: now,
+              trialEndsAt,
+              // Required for the QR form to accept scans during the trial —
+              // `QrService.submitPurchase` gates on the same entitlement.
+              isActive: true,
+              subscriptionStatus: "trialing",
+            });
+            logger.info({ companyId: company.id, days, trialEndsAt }, "Free trial started");
+          }
+        }
       }
 
       return { userId: user.id, email: user.email };

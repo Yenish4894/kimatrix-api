@@ -7,6 +7,10 @@ import { getRedisClient, closeRedis } from "@/config/redis.client";
 import { closeEmailQueue } from "@/queues/email.queue";
 import { startEmailWorker, stopEmailWorker } from "@/workers/email.worker";
 import { startTokenCleanupCron, stopTokenCleanupCron } from "@/cron/tokenCleanup.cron";
+import {
+  startSubscriptionStatusCron,
+  stopSubscriptionStatusCron,
+} from "@/cron/subscriptionStatus.cron";
 import { logger } from "@/utils/logger";
 import { getMailer } from "@/config/mailer";
 
@@ -59,6 +63,7 @@ async function start(): Promise<void> {
   getRedisClient();
   startEmailWorker();
   startTokenCleanupCron();
+  startSubscriptionStatusCron();
 
   const server = app.listen(config.PORT, () => {
     logger.info({ port: config.PORT, env: config.NODE_ENV }, "Server listening");
@@ -72,8 +77,20 @@ async function start(): Promise<void> {
     }, 10_000);
     forceTimer.unref();
 
-    server.close(() => logger.info("HTTP server closed"));
+    // Awaited. Previously this was fire-and-forget, so `closeDatabase()` ran while
+    // requests were still executing — in-flight PayPal captures and QR submissions had
+    // the pool pulled out from under them mid-transaction and lost their writes on every
+    // deploy. server.close() stops accepting new connections immediately and resolves
+    // only once the last in-flight response has been sent; the 10s force timer above
+    // bounds it if a client holds a connection open.
     stopTokenCleanupCron();
+    stopSubscriptionStatusCron();
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        logger.info("HTTP server closed");
+        resolve();
+      });
+    });
     await stopEmailWorker();
     await closeEmailQueue();
     await closeDatabase();

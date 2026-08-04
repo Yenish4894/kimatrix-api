@@ -60,6 +60,54 @@ export class PaymentRepository {
       .getOne();
   }
 
+  async findByIdForUpdate(id: string, manager: EntityManager): Promise<Payment | null> {
+    // Same `FOR UPDATE OF p` scoping as above — Postgres rejects FOR UPDATE on the
+    // nullable side of a LEFT JOIN.
+    return manager
+      .getRepository(Payment)
+      .createQueryBuilder("p")
+      .setLock("pessimistic_write", undefined, ["p"])
+      .leftJoinAndSelect("p.company", "company")
+      .leftJoinAndSelect("p.plan", "plan")
+      .where("p.id = :id", { id })
+      .getOne();
+  }
+
+  /**
+   * Atomically move a payment from `pending` to `capturing`, returning it only if THIS
+   * caller won the transition.
+   *
+   * This replaces holding a row lock across the PayPal HTTP call. The capture request
+   * takes up to 15s, and doing it inside a transaction meant a timeout AFTER PayPal had
+   * already debited the buyer rolled the row back to `pending` — money taken, nothing
+   * granted — while also pinning one of only 10 pool connections for the duration.
+   *
+   * A single conditional UPDATE is its own mutual exclusion: two concurrent callers
+   * cannot both match `status = 'pending'`.
+   */
+  async claimForCapture(
+    orderId: string,
+    companyId: string,
+    manager?: EntityManager,
+  ): Promise<Payment | null> {
+    const result = await this.getRepo(manager)
+      .createQueryBuilder()
+      .update(Payment)
+      .set({ status: "capturing" })
+      .where("paypal_order_id = :orderId", { orderId })
+      .andWhere("company_id = :companyId", { companyId })
+      .andWhere("status = :pending", { pending: "pending" })
+      .returning("id")
+      .execute();
+
+    const claimedId = (result.raw as { id: string }[] | undefined)?.[0]?.id;
+    if (!claimedId) return null;
+    return this.getRepo(manager).findOne({
+      where: { id: claimedId },
+      relations: ["company", "plan"],
+    });
+  }
+
   async updateCaptured(
     id: string,
     data: {

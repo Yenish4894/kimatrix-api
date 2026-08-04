@@ -62,12 +62,13 @@ export const addressFields = {
 
 export const idParamsSchema = Joi.object({
   id: commonPatterns.uuid.required(),
-})
-  .strict()
-  .required();
+}).required();
 
 export const paginationSchema = Joi.object({
-  page: commonPatterns.positiveInt.default(1),
+  // Bounded: `?page=999999999` becomes OFFSET 9999999980 on a joined
+  // getManyAndCount, holding a pool connection while Postgres walks and discards the
+  // entire index.
+  page: commonPatterns.positiveInt.max(10_000).default(1),
   limit: commonPatterns.positiveInt.max(100).default(10),
   search: Joi.string().trim().max(255).allow(""),
 });

@@ -9,7 +9,16 @@ export const AppDataSource = new DataSource({
   username: config.DB_USERNAME,
   password: config.DB_PASSWORD,
   database: config.DB_NAME,
-  ssl: config.DB_SSL ? { rejectUnauthorized: false } : false,
+  // `rejectUnauthorized: false` would encrypt the connection but not authenticate it —
+  // anything able to answer on the DB address could present a self-signed certificate
+  // and read every credential hash and payment row in transit, which makes TLS
+  // decorative. Supply DB_CA_CERT when the provider uses a private CA.
+  ssl: config.DB_SSL
+    ? {
+        rejectUnauthorized: true,
+        ...(config.DB_CA_CERT ? { ca: config.DB_CA_CERT } : {}),
+      }
+    : false,
   synchronize: false,
   logging: isDevelopment ? ["error", "warn", "schema"] : ["error"],
   entities: isDevelopment ? ["src/entities/*.ts"] : ["dist/src/entities/*.js"],

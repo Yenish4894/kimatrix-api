@@ -33,6 +33,15 @@ function buildLimiter(opts: BuildLimiterOptions) {
     standardHeaders: true,
     legacyHeaders: false,
     store: redisStore(opts.prefix),
+    // Fail OPEN on a store error. The default is false, which routes a Redis failure
+    // to next(error) — and since globalApiLimiter fronts all of /api, any Redis blip
+    // (failover, restart, exhausted retry budget) turned EVERY request into a 500,
+    // including the PayPal webhook and the public QR endpoint. That makes a cache a
+    // hard availability dependency on the money path.
+    //
+    // Losing rate limiting for the seconds Redis is unavailable is strictly better
+    // than losing the application. The failure is logged by the store's own handler.
+    passOnStoreError: true,
     ...(opts.keyGenerator ? { keyGenerator: opts.keyGenerator } : {}),
     ...(opts.skipSuccessfulRequests ? { skipSuccessfulRequests: opts.skipSuccessfulRequests } : {}),
     message: {
@@ -43,11 +52,56 @@ function buildLimiter(opts: BuildLimiterOptions) {
   });
 }
 
+/**
+ * Normalise a client IP for use in a rate-limit key.
+ *
+ * IPv6 is collapsed to its /64 prefix: a single residential allocation is a /64 or
+ * larger, so keying on the full address lets one connection rotate through billions of
+ * distinct keys. IPv4 is used whole. (`express-rate-limit` 7.5.1 does not export its
+ * own `ipKeyGenerator`, hence the local implementation.)
+ */
+function ipKey(ip: string | undefined): string {
+  if (!ip) return "unknown";
+  const addr = ip.startsWith("::ffff:") ? ip.slice(7) : ip; // unwrap IPv4-mapped IPv6
+  if (!addr.includes(":")) return addr;
+  return `${addr.split(":").slice(0, 4).join(":")}::/64`;
+}
+
+/**
+ * Keyed on IP + token + mobile.
+ *
+ * The IP component is the important part. A custom `keyGenerator` REPLACES the default
+ * IP key entirely, so bucketing on `qrToken:mobile` alone meant an attacker only had to
+ * increment the phone number on each request to get a fresh bucket — defeating both
+ * QR limiters and the service-layer resubmit cooldown, which is also mobile-keyed.
+ *
+ * The only remaining brake was the global 100-per-15-min IP cap, i.e. roughly 400
+ * forged purchases an hour, each creating a customer row and inflating that company's
+ * total spend. This is the one unauthenticated write path in the system and there is no
+ * delete path, so the corruption is permanent.
+ *
+ * `ipKey` is used rather than raw `req.ip` because it normalises IPv6 to a /64 subnet —
+ * a bare IPv6 address is trivially rotated within a single allocation.
+ */
 function qrSubmitKey(req: Request, windowLabel: string): string {
   const qrToken = req.params["qrToken"] ?? "unknown";
   const mobile = typeof req.body?.mobile === "string" ? req.body.mobile : "unknown";
-  return `${qrToken}:${mobile}:${windowLabel}`;
+  return `${ipKey(req.ip)}:${qrToken}:${mobile}:${windowLabel}`;
 }
+
+/**
+ * Companion cap with NO mobile component, so rotating the phone number cannot escape
+ * it. Bounds how many submissions one device can make against one merchant per day,
+ * whatever identity it claims.
+ */
+export const qrSubmitPerDevicePerDayLimiter = buildLimiter({
+  prefix: "qr_submit_device_day",
+  windowMs: ONE_DAY,
+  limit: 30,
+  keyGenerator: (req: Request) =>
+    `${ipKey(req.ip)}:${req.params["qrToken"] ?? "unknown"}:device_day`,
+  message: "Too many submissions from this device today. Please try again tomorrow.",
+});
 
 export const globalApiLimiter = buildLimiter({
   prefix: "api_global",

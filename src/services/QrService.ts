@@ -1,4 +1,5 @@
 import { AppDataSource } from "data-source";
+import type { EntityManager } from "typeorm";
 import { config } from "@/config/index";
 import type { Company } from "@/entities/Company";
 import { Customer } from "@/entities/Customer";
@@ -85,7 +86,7 @@ export class QrService {
       const vehicleNumber = input.vehicleNumber?.trim().toUpperCase() ?? null;
       const invoiceNumber = input.invoiceNumber.trim();
 
-      await this.assertResubmitCooldown(company.id, mobile);
+      await this.assertResubmitCooldown(company.id, mobile, manager);
 
       const invoiceExists = await this.purchaseRepository.findByCompanyAndInvoice(
         company.id,
@@ -185,7 +186,22 @@ export class QrService {
     });
   }
 
-  private async assertResubmitCooldown(companyId: string, mobile: string): Promise<void> {
+  /**
+   * @param manager REQUIRED. This runs inside `submitPurchase`'s transaction, and
+   * omitting it took a SECOND connection from the pool for the same request. With
+   * `max: 10`, ten simultaneous scans held all ten inside their transactions and then
+   * each waited for an eleventh that could never arrive — every one timing out after
+   * 5s and starving the rest of the app alongside them. Ten concurrent scans is one
+   * busy forecourt, not a load test.
+   *
+   * It also makes the cooldown read consistent with the write it guards, which it
+   * previously wasn't.
+   */
+  private async assertResubmitCooldown(
+    companyId: string,
+    mobile: string,
+    manager: EntityManager,
+  ): Promise<void> {
     const intervalMinutes = config.QR_MIN_RESUBMIT_INTERVAL_MIN;
     if (intervalMinutes <= 0) return;
     const intervalMs = intervalMinutes * 60_000;
@@ -193,6 +209,7 @@ export class QrService {
     const recent = await this.customerRepository.findMostRecentByCompanyAndMobile(
       companyId,
       mobile,
+      manager,
     );
     if (!recent) return;
 

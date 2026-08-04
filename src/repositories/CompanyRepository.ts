@@ -164,4 +164,53 @@ export class CompanyRepository {
       totalShops: Number(raw?.shops ?? 0),
     };
   }
+
+  /**
+   * Extend the subscription by `durationDays`, stacking onto any time remaining, and
+   * activate the company. Returns the resulting window.
+   *
+   * Deliberately a single atomic UPDATE rather than read-compute-write. The previous
+   * code read `subscription_expires_at` from an unlocked LEFT JOIN, added the plan
+   * duration in JS, and wrote the result — so two payments captured concurrently (two
+   * tabs, or the capture racing its own webhook) both read the same expiry, both
+   * computed the same new one, and both wrote it. The customer was charged twice and
+   * received one period.
+   *
+   * Referencing the column on the right-hand side of SET is the standard atomic
+   * increment pattern: under READ COMMITTED, Postgres re-reads the row and
+   * re-evaluates the expression if a concurrent transaction updated it first, so the
+   * second payment stacks on the first instead of overwriting it.
+   */
+  async extendSubscription(
+    params: {
+      companyId: string;
+      planId: string;
+      durationDays: number;
+      now: Date;
+    },
+    manager: EntityManager,
+  ): Promise<{ subscriptionStartsAt: Date; subscriptionEndsAt: Date }> {
+    const rows: { starts_at: Date; ends_at: Date }[] = await manager.query(
+      `UPDATE "companies"
+          SET "subscription_expires_at" =
+                GREATEST(COALESCE("subscription_expires_at", $2::timestamptz), $2::timestamptz)
+                + make_interval(days => $3::int),
+              "is_active" = true,
+              "current_plan_id" = $4,
+              "deactivated_at" = NULL,
+              "deactivated_by_user_id" = NULL
+        WHERE "id" = $1
+          AND "deleted_at" IS NULL
+        RETURNING
+          "subscription_expires_at" - make_interval(days => $3::int) AS starts_at,
+          "subscription_expires_at" AS ends_at`,
+      [params.companyId, params.now, params.durationDays, params.planId],
+    );
+
+    const row = rows[0];
+    if (!row) {
+      throw new Error(`extendSubscription: company ${params.companyId} not found`);
+    }
+    return { subscriptionStartsAt: row.starts_at, subscriptionEndsAt: row.ends_at };
+  }
 }

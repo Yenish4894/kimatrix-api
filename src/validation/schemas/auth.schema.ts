@@ -2,6 +2,22 @@ import Joi from "joi";
 import { addressFields, commonPatterns } from "./common.schema";
 import { BUSINESS_TYPES } from "@/entities/Company";
 
+/**
+ * NOTE ON `.strict()` — do not add it at the object level.
+ *
+ * In Joi, `.strict()` means "no type conversion", NOT "reject unknown keys" (unknown
+ * keys are handled by the middleware's `stripUnknown`). Applied to an object it sets
+ * `convert: false` for the entire subtree, which turns `.trim()` and `.lowercase()`
+ * from transforms into ASSERTIONS.
+ *
+ * That is what it did here: `John.Doe@Gmail.com` was rejected with "email must only
+ * contain lowercase characters", and any address field with a trailing space was
+ * rejected too. Registration and password reset were both unusable for anyone who
+ * capitalises their own email address — which is most people.
+ *
+ * If you need to block coercion, put `.strict()` on the individual field.
+ */
+
 export const registerCompanySchema = Joi.object({
   name: commonPatterns.name.required(),
   streetAddress: addressFields.streetAddress.required(),
@@ -26,13 +42,15 @@ export const registerCompanySchema = Joi.object({
     .messages({ "any.only": "Passwords do not match." }),
 
   promoEmailOptIn: Joi.boolean().default(false),
+  // `.strict()` on this ONE field, not the object. Terms acceptance is a legal record,
+  // so it must be an actual boolean `true` rather than the string "true" coerced into
+  // one. Everything else on this schema wants coercion — see the note below.
   termsAccepted: Joi.boolean()
+    .strict()
     .valid(true)
     .required()
     .messages({ "any.only": "You must accept the terms to continue." }),
-})
-  .strict()
-  .required();
+}).required();
 
 export interface RegisterCompanyInput {
   name: string;
@@ -59,9 +77,7 @@ export const loginSchema = Joi.object({
     "any.required": "identifier (email or username) is required",
   }),
   password: Joi.string().min(1).max(128).required(),
-})
-  .strict()
-  .required();
+}).required();
 
 export interface LoginInput {
   identifier: string;
@@ -70,9 +86,7 @@ export interface LoginInput {
 
 export const refreshTokenSchema = Joi.object({
   refreshToken: Joi.string().trim().min(10).max(512).required(),
-})
-  .strict()
-  .required();
+}).required();
 
 export interface RefreshTokenInput {
   refreshToken: string;
@@ -80,9 +94,7 @@ export interface RefreshTokenInput {
 
 export const passwordResetRequestSchema = Joi.object({
   email: commonPatterns.email.required(),
-})
-  .strict()
-  .required();
+}).required();
 
 export interface PasswordResetRequestInput {
   email: string;
@@ -95,9 +107,7 @@ export const passwordResetConfirmSchema = Joi.object({
     .valid(Joi.ref("newPassword"))
     .required()
     .messages({ "any.only": "New passwords do not match." }),
-})
-  .strict()
-  .required();
+}).required();
 
 export interface PasswordResetConfirmInput {
   token: string;
@@ -115,9 +125,7 @@ export const emailVerificationConfirmSchema = Joi.object({
     "string.max": "This verification link is invalid or has expired.",
     "any.required": "This verification link is invalid or has expired.",
   }),
-})
-  .strict()
-  .required();
+}).required();
 
 export interface EmailVerificationConfirmInput {
   token: string;
@@ -130,9 +138,7 @@ export const passwordChangeSchema = Joi.object({
     .valid(Joi.ref("newPassword"))
     .required()
     .messages({ "any.only": "New passwords do not match." }),
-})
-  .strict()
-  .required();
+}).required();
 
 export interface PasswordChangeInput {
   currentPassword: string;
