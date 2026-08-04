@@ -7,6 +7,7 @@ import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { EmailService } from "@/services/EmailService";
 import { PasswordService } from "@/services/PasswordService";
 import { SettingsService } from "@/services/SettingsService";
+import { TrialIdentityService } from "@/services/TrialIdentityService";
 import { TokenService, type IssuedTokens } from "@/services/TokenService";
 import { config } from "@/config/index";
 import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from "@/errors/index";
@@ -64,6 +65,19 @@ export interface RegisterCompanyResult {
   companyIsActive: boolean;
   /** False until the verification link is clicked. The trial clock starts on verify. */
   emailVerified: boolean;
+  trial: {
+    /**
+     * Advisory. The authoritative decision is made when the verification link is
+     * clicked, so this can go from true to false if another registration claims the
+     * same identifier in between.
+     *
+     * Deliberately does NOT say which identifier matched — this is an
+     * unauthenticated endpoint, and naming the field would turn it into an
+     * enumeration oracle over every email and phone number we hold.
+     */
+    eligible: boolean;
+    durationDays: number;
+  };
   tokens: IssuedTokens;
 }
 
@@ -100,6 +114,7 @@ export class AuthService {
   private userRepository = new UserRepository();
   private companyRepository = new CompanyRepository();
   private settingsService = new SettingsService();
+  private trialIdentityService = new TrialIdentityService();
   private passwordService = new PasswordService();
   private tokenService = new TokenService();
   private tokenRepository = new TokenRepository();
@@ -163,6 +178,19 @@ export class AuthService {
       // subscription payment in the same flow (no separate manual login step).
       const tokens = await this.tokenService.issueTokens(user, company.id, context, manager);
 
+      // Read-only probe so the success screen can say "your 7-day trial starts when
+      // you confirm your email" rather than promising something we will refuse. The
+      // identifiers are NOT claimed here — see confirmEmailVerification.
+      const trialEligible = await this.trialIdentityService.isEligible(
+        {
+          loginEmail: email,
+          contactEmail: input.contactEmail,
+          contactPhone: input.contactPhone,
+        },
+        manager,
+      );
+      const trialDurationDays = await this.settingsService.getTrialDurationDays(manager);
+
       return {
         user: {
           id: user.id,
@@ -192,6 +220,7 @@ export class AuthService {
         companyId: company.id,
         companyIsActive: company.isActive,
         emailVerified: user.emailVerifiedAt != null,
+        trial: { eligible: trialEligible, durationDays: trialDurationDays },
         tokens,
       };
     };
@@ -521,18 +550,38 @@ export class AuthService {
             company.trialStartedAt === null &&
             company.subscriptionExpiresAt === null
           ) {
-            const days = await this.settingsService.getTrialDurationDays(manager);
-            const now = new Date();
-            const trialEndsAt = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
-            await manager.getRepository(Company).update(company.id, {
-              trialStartedAt: now,
-              trialEndsAt,
-              // Required for the QR form to accept scans during the trial —
-              // `QrService.submitPurchase` gates on the same entitlement.
-              isActive: true,
-              subscriptionStatus: "trialing",
-            });
-            logger.info({ companyId: company.id, days, trialEndsAt }, "Free trial started");
+            // One trial per email address and per phone number, ever, across all
+            // companies. The claim happens HERE rather than at registration because
+            // this is the first point at which control of the address is proven —
+            // claiming at registration would let anyone burn a stranger's trial by
+            // typing their address into a form they never confirm.
+            const mayTrial = await this.trialIdentityService.claimForTrial(
+              {
+                loginEmail: user.email,
+                contactEmail: company.contactEmail,
+                contactPhone: company.contactPhone,
+              },
+              company.id,
+              manager,
+            );
+
+            if (mayTrial) {
+              const days = await this.settingsService.getTrialDurationDays(manager);
+              const now = new Date();
+              const trialEndsAt = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+              await manager.getRepository(Company).update(company.id, {
+                trialStartedAt: now,
+                trialEndsAt,
+                // Required for the QR form to accept scans during the trial —
+                // `QrService.submitPurchase` gates on the same entitlement.
+                isActive: true,
+                subscriptionStatus: "trialing",
+              });
+              logger.info({ companyId: company.id, days, trialEndsAt }, "Free trial started");
+            }
+            // No else: the company stays `pending`, which `computeEntitlement`
+            // already renders as the paywall. Registration is never blocked by a
+            // repeat identifier — only the free trial is.
           }
         }
       }

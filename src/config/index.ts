@@ -37,6 +37,12 @@ export const config = {
   // checks their inbox later.
   EMAIL_VERIFICATION_TTL_MIN: parseInt10(process.env["EMAIL_VERIFICATION_TTL_MIN"], 1440),
 
+  // Server-side pepper for the trial identity registry (utils/identity.ts). Without
+  // it the stored digests are brute-forceable back to real phone numbers and emails,
+  // so `validateConfig` treats it as required in production and refuses to boot on a
+  // default. Rotating it orphans every existing claim — see be-decisions.md.
+  TRIAL_IDENTITY_PEPPER: process.env["TRIAL_IDENTITY_PEPPER"] ?? "",
+
   // Fallback free-trial length, used only to seed `app_settings` and if that table
   // cannot be read. The live value is admin-editable at `PATCH /admin/settings`;
   // read it via SettingsService, never from here.
@@ -95,6 +101,13 @@ export function validateConfig(): void {
 
   if (config.JWT_SECRET.length < 32 || config.JWT_REFRESH_SECRET.length < 32) {
     throw new Error("[config] JWT secrets must be at least 32 characters");
+  }
+
+  // Not in REQUIRED_KEYS: local development should not need this set, but production
+  // must never run with an empty pepper — that silently downgrades every stored
+  // identity hash to a plain SHA-256 of a phone number, which is recoverable.
+  if (config.NODE_ENV === "production" && config.TRIAL_IDENTITY_PEPPER.length < 32) {
+    throw new Error("[config] TRIAL_IDENTITY_PEPPER must be set to at least 32 characters");
   }
 }
 
