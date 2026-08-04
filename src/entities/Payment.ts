@@ -2,6 +2,7 @@ import { Entity, Column, ManyToOne, JoinColumn, Index, type Relation } from "typ
 import { BaseEntity } from "./BaseEntity";
 import { Company } from "./Company";
 import { Plan } from "./Plan";
+import { Subscription } from "./Subscription";
 
 /**
  * `capturing` is the in-flight state: this row has been claimed and a capture request
@@ -23,6 +24,9 @@ export const PAYMENT_STATUSES = [
 ] as const;
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 
+export const PAYMENT_KINDS = ["order", "subscription_cycle"] as const;
+export type PaymentKind = (typeof PAYMENT_KINDS)[number];
+
 @Entity("payments")
 export class Payment extends BaseEntity {
   @ManyToOne(() => Company, { nullable: false, onDelete: "RESTRICT" })
@@ -34,8 +38,31 @@ export class Payment extends BaseEntity {
   plan!: Relation<Plan>;
 
   @Index({ unique: true })
-  @Column({ name: "paypal_order_id", type: "varchar", length: 64 })
-  paypalOrderId!: string;
+  /**
+   * Null for a recurring cycle payment, which has a sale id instead. A DB CHECK
+   * enforces that each row carries whichever identifier its `kind` implies.
+   */
+  @Column({ name: "paypal_order_id", type: "varchar", length: 64, nullable: true })
+  paypalOrderId!: string | null;
+
+  /**
+   * PayPal's id for one recurring charge.
+   *
+   * Partial-UNIQUE in the database. That index is THE backstop against crediting a
+   * billing cycle twice: PayPal resends PAYMENT.SALE.COMPLETED on retry and guarantees
+   * neither ordering nor deduplication, so an application-level check is a race and a
+   * unique index is not.
+   */
+  @Column({ name: "paypal_sale_id", type: "varchar", length: 64, nullable: true })
+  paypalSaleId!: string | null;
+
+  /** Which era this payment belongs to. `payments` is the ledger for both. */
+  @Column({ type: "varchar", length: 20, default: "order" })
+  kind!: PaymentKind;
+
+  @ManyToOne(() => Subscription, { nullable: true, onDelete: "SET NULL" })
+  @JoinColumn({ name: "subscription_id" })
+  subscription!: Relation<Subscription> | null;
 
   @Column({ name: "status", type: "varchar", length: 20 })
   status!: PaymentStatus;

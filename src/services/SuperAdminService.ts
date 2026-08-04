@@ -6,6 +6,7 @@ import { TrialIdentityRepository } from "@/repositories/TrialIdentityRepository"
 import type { TrialIdentity } from "@/entities/TrialIdentity";
 import type { SubscriptionStatus } from "@/entities/Company";
 import { computeEntitlement } from "@/utils/entitlement";
+import { SubscriptionService } from "@/services/SubscriptionService";
 import type {
   CompanyBusinessTypeFilter,
   CompanyStatusFilter,
@@ -32,6 +33,7 @@ export interface PlatformStatsResult extends PlatformStats {
 export class SuperAdminService {
   private companyRepository = new CompanyRepository();
   private trialIdentityRepository = new TrialIdentityRepository();
+  private subscriptionService = new SubscriptionService();
   private customerRepository = new CustomerRepository();
   private tokenRepository = new TokenRepository();
 
@@ -63,6 +65,11 @@ export class SuperAdminService {
       if (company.deactivatedAt != null) {
         throw BadRequestError("This company is already deactivated.");
       }
+
+      // Stop billing before flipping the switch. Without this we would keep charging a
+      // company we have just banned — every renewal, indefinitely, with no way for them
+      // to log in and stop it.
+      await this.subscriptionService.cancelForAdmin(companyId, manager);
 
       await this.companyRepository.setDeactivated(companyId, adminUserId, manager);
       await this.tokenRepository.revokeAllRefreshTokensForUser(company.owner.id, manager);

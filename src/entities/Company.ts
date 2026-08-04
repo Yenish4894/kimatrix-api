@@ -15,6 +15,7 @@ import { Customer } from "./Customer";
 import { Purchase } from "./Purchase";
 import { Plan } from "./Plan";
 import { Payment } from "./Payment";
+import { Subscription } from "./Subscription";
 
 export const BUSINESS_TYPES = ["fuel_station", "shop"] as const;
 export type BusinessType = (typeof BUSINESS_TYPES)[number];
@@ -187,4 +188,18 @@ export class Company extends BaseEntity {
 
   @OneToMany(() => Payment, (payment) => payment.company)
   payments!: Relation<Payment[]>;
+
+  /**
+   * The live recurring subscription, if any.
+   *
+   * Deliberately NOT an access gate. Access is still decided entirely by
+   * `subscription_expires_at` via computeEntitlement — a recurring subscription only
+   * ever pushes that column forward when a payment lands. That separation is what lets
+   * the legacy Orders era, the trial era and the recurring era coexist with no
+   * branching in the gate, and it means a missed webhook cannot lock out someone who
+   * has actually paid.
+   */
+  @ManyToOne(() => Subscription, { nullable: true, onDelete: "SET NULL" })
+  @JoinColumn({ name: "current_subscription_id" })
+  currentSubscription!: Relation<Subscription> | null;
 }

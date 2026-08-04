@@ -17,6 +17,9 @@ import { Payment } from "./Payment";
  * Cosmetic fields (`name`, `description`, `sortOrder`, `isPopular`) ARE edited in place —
  * they carry no billing meaning.
  */
+export const BILLING_INTERVAL_UNITS = ["DAY", "WEEK", "MONTH", "YEAR"] as const;
+export type BillingIntervalUnit = (typeof BILLING_INTERVAL_UNITS)[number];
+
 @Entity("plans")
 @Index("idx_plans_active_sort", ["isActive", "sortOrder"])
 export class Plan extends BaseEntity {
@@ -75,4 +78,31 @@ export class Plan extends BaseEntity {
 
   @OneToMany(() => Payment, (payment) => payment.plan)
   payments!: Relation<Payment[]>;
+
+  // ── PayPal Subscriptions (Phase 6) ──────────────────────────────────────
+  //
+  // One PayPal billing plan per plans row, for the whole life of that row. PayPal
+  // plans are immutable once they have subscribers, which is exactly why the existing
+  // plan-versioning rule already fits: a price or duration change archives this row
+  // and creates a successor, so the PayPal plan never needs to change either.
+
+  @Column({ name: "paypal_product_id", type: "varchar", length: 64, nullable: true })
+  paypalProductId!: string | null;
+
+  @Column({ name: "paypal_plan_id", type: "varchar", length: 64, nullable: true })
+  paypalPlanId!: string | null;
+
+  @Column({ name: "billing_interval_unit", type: "varchar", length: 8, nullable: true })
+  billingIntervalUnit!: BillingIntervalUnit | null;
+
+  @Column({ name: "billing_interval_count", type: "integer", nullable: true })
+  billingIntervalCount!: number | null;
+
+  /**
+   * Whether this plan can be subscribed to on a recurring basis. False for legacy
+   * one-time plans and for any plan whose PayPal counterpart has not been synced yet —
+   * a DB CHECK enforces that a recurring plan always has its PayPal ids and cadence.
+   */
+  @Column({ name: "is_recurring", type: "boolean", default: false })
+  isRecurring!: boolean;
 }

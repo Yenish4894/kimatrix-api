@@ -1,5 +1,12 @@
 import type { NextFunction, Request, Response } from "express";
 import { BaseController } from "@/controllers/BaseController";
+import { SubscriptionService } from "@/services/SubscriptionService";
+import type {
+  CancelSubscriptionInput,
+  ChangePlanInput,
+  ConfirmSubscriptionInput,
+  SubscribeInput,
+} from "@/validation/schemas/payment.schema";
 import { PaymentService } from "@/services/PaymentService";
 import { BadRequestError } from "@/errors/index";
 import { logger } from "@/utils/logger";
@@ -7,6 +14,8 @@ import { logger } from "@/utils/logger";
 const paymentService = new PaymentService();
 
 export class PaymentController extends BaseController {
+  private subscriptionService = new SubscriptionService();
+
   getPlans = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       const plans = await paymentService.getPlans();
@@ -73,5 +82,60 @@ export class PaymentController extends BaseController {
       );
       res.status(500).json({ received: false });
     }
+  };
+
+  // ─── Subscriptions ────────────────────────────────────────────────────────
+
+  subscribe = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const companyId = req.company!.id;
+      const { planId } = req.body as SubscribeInput;
+      const result = await this.subscriptionService.subscribe(companyId, planId);
+      return { data: result, message: "Approve the subscription to continue.", statusCode: 201 };
+    });
+  };
+
+  confirmSubscription = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const companyId = req.company!.id;
+      const { paypalSubscriptionId } = req.body as ConfirmSubscriptionInput;
+      const status = await this.subscriptionService.confirm(companyId, paypalSubscriptionId);
+      return { data: status, message: "Your subscription is set up." };
+    });
+  };
+
+  subscriptionStatus = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const companyId = req.company!.id;
+      return { data: await this.subscriptionService.getStatus(companyId) };
+    });
+  };
+
+  cancelSubscription = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const companyId = req.company!.id;
+      const { reason } = req.body as CancelSubscriptionInput;
+      const result = await this.subscriptionService.cancel(companyId, reason);
+      return {
+        data: result,
+        message: result.accessUntil
+          ? "Your subscription is cancelled. You keep access until the end of the period you've paid for."
+          : "Your subscription is cancelled.",
+      };
+    });
+  };
+
+  changePlan = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const companyId = req.company!.id;
+      const { planId } = req.body as ChangePlanInput;
+      const result = await this.subscriptionService.changePlan(companyId, planId);
+      return {
+        data: result,
+        message: result.approvalUrl
+          ? "Approve the change to finish."
+          : "Your plan changes at your next renewal.",
+      };
+    });
   };
 }

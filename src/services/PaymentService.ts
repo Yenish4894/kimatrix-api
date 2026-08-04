@@ -5,6 +5,7 @@ import { PlanRepository } from "@/repositories/PlanRepository";
 import { PaymentRepository } from "@/repositories/PaymentRepository";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { PaypalService } from "@/services/PaypalService";
+import { PaypalWebhookService } from "@/services/PaypalWebhookService";
 import { BadRequestError, ConflictError, NotFoundError } from "@/errors/index";
 import type { Plan } from "@/entities/Plan";
 
@@ -37,6 +38,7 @@ export class PaymentService {
   private paymentRepository = new PaymentRepository();
   private companyRepository = new CompanyRepository();
   private paypalService = new PaypalService();
+  private paypalWebhookService = new PaypalWebhookService();
 
   async getPlans(): Promise<PlanDto[]> {
     const plans = await this.planRepository.findAllActive();
@@ -227,7 +229,15 @@ export class PaymentService {
     }
 
     const eventType = event["event_type"] as string | undefined;
-    if (eventType !== "PAYMENT.CAPTURE.COMPLETED") return;
+
+    // Everything that is not an Orders-era capture belongs to the Subscriptions
+    // handler — the subscription lifecycle and recurring sale events. Routed here
+    // rather than on a second endpoint because PayPal sends every event for the app to
+    // one configured webhook URL.
+    if (eventType !== "PAYMENT.CAPTURE.COMPLETED") {
+      await this.paypalWebhookService.handle(event);
+      return;
+    }
 
     const resource = event["resource"] as Record<string, unknown> | undefined;
     // PayPal PAYMENT.CAPTURE.COMPLETED shape:

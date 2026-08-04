@@ -30,3 +30,51 @@ export const captureOrderSchema = Joi.object({
       "string.max": "That payment reference isn't valid.",
     }),
 }).required();
+
+// ─── Subscriptions (Phase 6) ────────────────────────────────────────────────
+
+export const subscribeSchema = Joi.object({
+  planId: commonPatterns.uuid.required().messages({
+    "any.required": "Choose a plan to continue.",
+    "string.guid": "That plan is no longer available.",
+  }),
+}).required();
+
+export const confirmSubscriptionSchema = Joi.object({
+  // PayPal subscription ids look like I-BW452GLLEP1G.
+  paypalSubscriptionId: Joi.string()
+    .trim()
+    .min(6)
+    .max(64)
+    .pattern(/^[A-Za-z0-9-]+$/)
+    .required()
+    .messages({
+      "any.required": "Missing subscription reference.",
+      "string.pattern.base": "That subscription reference isn't valid.",
+    }),
+}).required();
+
+export const cancelSubscriptionSchema = Joi.object({
+  // Asked for, not required: making someone justify leaving is a dark pattern, and a
+  // blank reason is more honest than a forced one.
+  reason: Joi.string().trim().max(255).allow("").default("Cancelled by customer"),
+}).required();
+
+export const changePlanSchema = Joi.object({
+  planId: commonPatterns.uuid.required().messages({
+    "any.required": "Choose the plan you want to move to.",
+  }),
+}).required();
+
+export interface SubscribeInput {
+  planId: string;
+}
+export interface ConfirmSubscriptionInput {
+  paypalSubscriptionId: string;
+}
+export interface CancelSubscriptionInput {
+  reason: string;
+}
+export interface ChangePlanInput {
+  planId: string;
+}
