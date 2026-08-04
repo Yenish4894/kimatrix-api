@@ -1,5 +1,6 @@
 import type { EntityManager, Repository } from "typeorm";
 import { AppDataSource } from "data-source";
+import { returningRows } from "@/utils/db";
 import { Company } from "@/entities/Company";
 
 export type CompanyStatusFilter = "all" | "active" | "inactive";
@@ -20,6 +21,55 @@ export interface PlatformStats {
   totalFuelStations: number;
   totalShops: number;
 }
+
+export const EXPIRY_NOTICE_KINDS = ["trial_ending", "trial_ended", "subscription_ended"] as const;
+export type ExpiryNoticeKind = (typeof EXPIRY_NOTICE_KINDS)[number];
+
+export interface ExpiryNoticeTarget {
+  company_id: string;
+  company_name: string;
+  country: string;
+  owner_email: string;
+  deadline: Date;
+}
+
+/**
+ * Column and predicate per notice. Kept as a lookup rather than three near-identical
+ * methods so the guard logic exists in exactly one place — the three differ only in
+ * which deadline they watch.
+ *
+ * Interpolated into SQL, so every value here must stay a hard-coded literal; none of
+ * it is ever caller-supplied.
+ */
+const EXPIRY_NOTICE_SQL: Record<
+  ExpiryNoticeKind,
+  { column: string; deadline: string; due: string }
+> = {
+  // Two days out, and only while the trial is still live.
+  trial_ending: {
+    column: "trial_ending_notice_for",
+    deadline: "trial_ends_at",
+    due: `c."trial_ends_at" IS NOT NULL
+          AND c."trial_ends_at" > now()
+          AND c."trial_ends_at" <= now() + interval '48 hours'
+          AND c."subscription_expires_at" IS NULL`,
+  },
+  // The moment it lapses. `subscription_expires_at IS NULL` skips anyone who converted.
+  trial_ended: {
+    column: "trial_ended_notice_for",
+    deadline: "trial_ends_at",
+    due: `c."trial_ends_at" IS NOT NULL
+          AND c."trial_ends_at" <= now()
+          AND c."subscription_expires_at" IS NULL`,
+  },
+  // A paid subscription running out.
+  subscription_ended: {
+    column: "subscription_ended_notice_for",
+    deadline: "subscription_expires_at",
+    due: `c."subscription_expires_at" IS NOT NULL
+          AND c."subscription_expires_at" <= now()`,
+  },
+};
 
 export class CompanyRepository {
   private getRepo(manager?: EntityManager): Repository<Company> {
@@ -190,7 +240,7 @@ export class CompanyRepository {
     },
     manager: EntityManager,
   ): Promise<{ subscriptionStartsAt: Date; subscriptionEndsAt: Date }> {
-    const rows: { starts_at: Date; ends_at: Date }[] = await manager.query(
+    const result = await manager.query(
       `UPDATE "companies"
           SET "subscription_expires_at" =
                 GREATEST(COALESCE("subscription_expires_at", $2::timestamptz), $2::timestamptz)
@@ -207,10 +257,74 @@ export class CompanyRepository {
       [params.companyId, params.now, params.durationDays, params.planId],
     );
 
-    const row = rows[0];
+    const row = returningRows<{ starts_at: Date; ends_at: Date }>(result)[0];
     if (!row) {
       throw new Error(`extendSubscription: company ${params.companyId} not found`);
     }
     return { subscriptionStartsAt: row.starts_at, subscriptionEndsAt: row.ends_at };
+  }
+
+  /**
+   * Atomically claims the companies due one of the three expiry notices and stamps the
+   * send-once marker in the same statement.
+   *
+   * Claim-then-send, never select-then-send: the UPDATE ... RETURNING is what makes
+   * two app instances (or two overlapping ticks) unable to both email the same
+   * customer. Whoever's UPDATE lands first gets the rows back; the other gets none.
+   *
+   * The guard is `notice_for IS DISTINCT FROM <deadline>` rather than `IS NULL`, so
+   * moving the deadline re-arms the notice automatically. `IS DISTINCT FROM` and not
+   * `<>` because both sides are nullable and `NULL <> x` evaluates to NULL, which
+   * would match nothing and silently stop all mail.
+   *
+   * Guards on `is_comped = false` and `deactivated_at IS NULL`: a comped company has
+   * no expiry to warn about, and telling a company an admin just banned that its
+   * trial is ending is noise at best.
+   *
+   * Callers MUST enqueue outside the surrounding transaction, and call
+   * `releaseExpiryNotice` if the enqueue fails — see the cron for why.
+   */
+  async claimExpiryNotices(
+    kind: ExpiryNoticeKind,
+    manager: EntityManager,
+  ): Promise<ExpiryNoticeTarget[]> {
+    const spec = EXPIRY_NOTICE_SQL[kind];
+    const result = await manager.query(
+      `UPDATE "companies" c
+          SET "${spec.column}" = c."${spec.deadline}"
+         FROM "users" u
+        WHERE u."id" = c."owner_user_id"
+          AND c."deleted_at" IS NULL
+          AND c."deactivated_at" IS NULL
+          AND c."is_comped" = false
+          AND u."is_active" = true
+          AND ${spec.due}
+          AND c."${spec.column}" IS DISTINCT FROM c."${spec.deadline}"
+      RETURNING c."id"            AS company_id,
+                c."name"          AS company_name,
+                c."country"       AS country,
+                u."email"         AS owner_email,
+                c."${spec.deadline}" AS deadline`,
+    );
+    return returningRows<ExpiryNoticeTarget>(result);
+  }
+
+  /**
+   * Puts a claimed notice back so the next tick retries it.
+   *
+   * Used when the enqueue fails after the claim committed. Without it a Redis blip
+   * would permanently consume the customer's only warning email — the marker would be
+   * set, so the cron would never look at that company again.
+   */
+  async releaseExpiryNotice(
+    kind: ExpiryNoticeKind,
+    companyId: string,
+    manager?: EntityManager,
+  ): Promise<void> {
+    const spec = EXPIRY_NOTICE_SQL[kind];
+    await (manager ?? AppDataSource.manager).query(
+      `UPDATE "companies" SET "${spec.column}" = NULL WHERE "id" = $1`,
+      [companyId],
+    );
   }
 }

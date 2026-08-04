@@ -4,6 +4,7 @@ import { redisConfig } from "@/config/redis.config";
 import { EMAIL_QUEUE_NAME, type EmailJobData } from "@/queues/email.queue";
 import { renderPasswordResetEmail } from "@/templates/passwordReset.template";
 import { renderEmailVerificationEmail } from "@/templates/emailVerification.template";
+import { renderSubscriptionNoticeEmail } from "@/templates/subscriptionNotice.template";
 import { logger } from "@/utils/logger";
 
 let worker: Worker<EmailJobData> | null = null;
@@ -42,6 +43,25 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       text: rendered.text,
     });
     logger.info({ jobId: job.id, type: data.type, to: data.to }, "Email sent");
+    return;
+  }
+
+  if (data.type === "subscriptionNotice") {
+    const rendered = renderSubscriptionNoticeEmail({
+      kind: data.kind,
+      companyName: data.companyName,
+      deadline: new Date(data.deadline),
+      billingUrl: data.billingUrl,
+      exportUrl: data.exportUrl,
+    });
+    await mailer.sendMail({
+      from: fromAddress(),
+      to: data.to,
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+    });
+    logger.info({ jobId: job.id, type: data.type, kind: data.kind, to: data.to }, "Email sent");
     return;
   }
 

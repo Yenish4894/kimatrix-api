@@ -138,6 +138,22 @@ export class Company extends BaseEntity {
   @Column({ name: "trial_ends_at", type: "timestamptz", nullable: true })
   trialEndsAt!: Date | null;
 
+  // ── Expiry-notice send-once markers ──
+  //
+  // Each holds THE DEADLINE THAT WAS NOTIFIED ABOUT, not a boolean or a sent-at time.
+  // The cron's guard is `notice_for IS DISTINCT FROM <the deadline>`, so extending a
+  // trial or renewing a subscription moves the deadline and re-arms the notice by
+  // itself — there is no flag for anyone to forget to reset.
+
+  @Column({ name: "trial_ending_notice_for", type: "timestamptz", nullable: true })
+  trialEndingNoticeFor!: Date | null;
+
+  @Column({ name: "trial_ended_notice_for", type: "timestamptz", nullable: true })
+  trialEndedNoticeFor!: Date | null;
+
+  @Column({ name: "subscription_ended_notice_for", type: "timestamptz", nullable: true })
+  subscriptionEndedNoticeFor!: Date | null;
+
   // ── Entitlement projection + admin comp ──
 
   @Column({

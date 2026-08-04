@@ -1,6 +1,9 @@
 import cron, { type ScheduledTask } from "node-cron";
 import { AppDataSource } from "data-source";
 import { logger } from "@/utils/logger";
+import { affectedRows } from "@/utils/db";
+import { CompanyRepository, EXPIRY_NOTICE_KINDS } from "@/repositories/CompanyRepository";
+import { EmailService } from "@/services/EmailService";
 
 /**
  * Hourly, not daily: a trial ending at 14:00 should not keep showing "active" in the
@@ -80,11 +83,80 @@ export async function reconcileSubscriptionStatuses(): Promise<number> {
       logger.debug("Subscription status reconcile skipped — another instance holds the lock");
       return 0;
     }
-    const result = (await manager.query(RECONCILE_SQL)) as unknown;
-    // node-postgres returns [rows, rowCount] through TypeORM's raw query for UPDATE.
-    const changed = Array.isArray(result) ? (result[1] as number) : 0;
-    return changed ?? 0;
+    return affectedRows(await manager.query(RECONCILE_SQL));
   });
+}
+
+/**
+ * Sends the three expiry notices: two days before a trial ends, when it ends, and
+ * when a paid subscription lapses.
+ *
+ * Claim and send are deliberately split across the transaction boundary:
+ *
+ *   1. Inside a transaction, atomically claim the due rows and stamp the send-once
+ *      marker. Two instances cannot both claim the same company.
+ *   2. AFTER that commits, enqueue. Enqueuing inside the transaction would let a
+ *      Redis outage roll back the claim, and would queue mail for rows that might
+ *      still roll back — customers receiving "your trial has ended" for a trial that
+ *      then didn't.
+ *   3. If the enqueue throws, put the notice back so the next tick retries. Without
+ *      this step a Redis blip permanently consumes the customer's only warning: the
+ *      marker is committed, so nothing would ever look at that company again.
+ *
+ * Each kind is claimed separately so one failing does not suppress the others.
+ */
+export async function sendExpiryNotices(): Promise<number> {
+  const companyRepository = new CompanyRepository();
+  const emailService = new EmailService();
+  let sent = 0;
+
+  for (const kind of EXPIRY_NOTICE_KINDS) {
+    let targets: Awaited<ReturnType<CompanyRepository["claimExpiryNotices"]>> = [];
+    try {
+      targets = await AppDataSource.transaction(async (manager) => {
+        const [{ locked }] = (await manager.query(
+          "SELECT pg_try_advisory_xact_lock($1, $2) AS locked",
+          [ADVISORY_LOCK_KEY, EXPIRY_NOTICE_KINDS.indexOf(kind)],
+        )) as [{ locked: boolean }];
+        if (!locked) return [];
+        return companyRepository.claimExpiryNotices(kind, manager);
+      });
+    } catch (err) {
+      logger.error({ err, kind }, "Failed to claim expiry notices");
+      continue;
+    }
+
+    for (const target of targets) {
+      try {
+        await emailService.enqueueSubscriptionNotice({
+          to: target.owner_email,
+          kind,
+          companyId: target.company_id,
+          companyName: target.company_name,
+          deadline: new Date(target.deadline),
+        });
+        sent++;
+      } catch (err) {
+        logger.error(
+          { err, kind, companyId: target.company_id },
+          "Failed to enqueue expiry notice — releasing it for the next tick",
+        );
+        await companyRepository
+          .releaseExpiryNotice(kind, target.company_id)
+          .catch((releaseErr: unknown) => {
+            // Nothing further to do: the notice is lost for this deadline. Logged
+            // loudly because it is the one path where a customer silently gets no
+            // warning at all.
+            logger.error(
+              { err: releaseErr, kind, companyId: target.company_id },
+              "Failed to release a claimed expiry notice — this customer will not be warned",
+            );
+          });
+      }
+    }
+  }
+
+  return sent;
 }
 
 export function startSubscriptionStatusCron(): void {
@@ -100,6 +172,14 @@ export function startSubscriptionStatusCron(): void {
         const changed = await reconcileSubscriptionStatuses();
         if (changed > 0) {
           logger.info({ changed }, "Subscription status reconcile completed");
+        }
+        // After the reconcile, never before: the notice predicates and the status
+        // projection read the same deadlines, and running them in this order means a
+        // customer is never emailed "your trial has ended" while the admin list still
+        // shows them as trialing.
+        const notices = await sendExpiryNotices();
+        if (notices > 0) {
+          logger.info({ notices }, "Expiry notices enqueued");
         }
       } catch (err) {
         logger.error({ err }, "Subscription status reconcile failed");

@@ -1,5 +1,6 @@
 import { Queue } from "bullmq";
 import { redisConfig } from "@/config/redis.config";
+import type { ExpiryNoticeKind } from "@/repositories/CompanyRepository";
 
 export type EmailJobData =
   | {
@@ -14,6 +15,16 @@ export type EmailJobData =
       verifyUrl: string;
       expiresInMinutes: number;
       trialDurationDays: number;
+    }
+  | {
+      type: "subscriptionNotice";
+      to: string;
+      kind: ExpiryNoticeKind;
+      companyName: string;
+      /** ISO string — BullMQ serialises job data to JSON, so a Date would arrive as one anyway. */
+      deadline: string;
+      billingUrl: string;
+      exportUrl: string;
     }
   | {
       type: "generic";
