@@ -45,6 +45,7 @@ export interface CompanyProfile {
   subscriptionStatus: SubscriptionStatus;
   /** Unified end-of-access across trial, paid and comp. `null` = perpetual or never started. */
   accessUntil: Date | null;
+  trialStartedAt: Date | null;
   trialEndsAt: Date | null;
   isTrial: boolean;
   isComped: boolean;
@@ -140,6 +141,11 @@ export class CompanyService {
       hasAccess: entitlement.hasAccess,
       subscriptionStatus: entitlement.status,
       accessUntil: entitlement.endsAt,
+      // Both ends of the trial window, because the dashboard progress bar needs the
+      // SPAN to be honest. With only the end date it has to guess a denominator, and
+      // the guess it made — the paid plan's duration, defaulting to 30 — drew day one
+      // of a 7-day trial as a nearly-spent bar.
+      trialStartedAt: company.trialStartedAt,
       trialEndsAt: company.trialEndsAt,
       isTrial: entitlement.isTrial,
       isComped: company.isComped,
