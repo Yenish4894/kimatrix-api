@@ -19,6 +19,15 @@ export interface PlanDto {
   /** Drives the "Most Popular" badge. Replaces the frontend's hardcoded 30-day check. */
   isPopular: boolean;
   sortOrder: number;
+  /**
+   * Whether this plan can be bought as a recurring subscription.
+   *
+   * Drives which flow the Pay button takes. False for legacy plans and for any plan
+   * whose PayPal billing plan has not been synced yet — those still go through the
+   * one-time Orders path, so an unsynced plan degrades to the old behaviour rather
+   * than failing at checkout.
+   */
+  isRecurring: boolean;
 }
 
 export interface InitiatePaymentResult {
@@ -296,6 +305,7 @@ export class PaymentService {
       currency: plan.currency,
       isPopular: plan.isPopular,
       sortOrder: plan.sortOrder,
+      isRecurring: plan.isRecurring === true && plan.paypalPlanId != null,
     };
   }
 }
