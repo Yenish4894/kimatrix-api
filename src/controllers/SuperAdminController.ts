@@ -4,6 +4,7 @@ import type {
   ExtendTrialInput,
   ReleaseTrialIdentityInput,
   SetCompInput,
+  AdminDeletionInput,
 } from "@/validation/schemas/admin.schema";
 import type { TrialIdentity } from "@/entities/TrialIdentity";
 import { SuperAdminService } from "@/services/SuperAdminService";
@@ -199,6 +200,44 @@ export class SuperAdminController extends BaseController {
       const { reason } = req.body as ReleaseTrialIdentityInput;
       await this.service.releaseTrialIdentity(identityId, reason, req.user!.id);
       return { data: null, message: "That identifier can be used for a free trial again." };
+    });
+  };
+
+  getDeletionStatus = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { companyId } = req.params as { companyId: string };
+      return { data: await this.service.getDeletionStatus(companyId) };
+    });
+  };
+
+  requestDeletion = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { companyId } = req.params as { companyId: string };
+      const { reason } = req.body as AdminDeletionInput;
+      const status = await this.service.requestDeletionForCompany(
+        companyId,
+        { id: req.user!.id, email: req.user!.email },
+        reason,
+      );
+      return {
+        data: status,
+        message: status.purgeAt
+          ? `Deletion scheduled. The data is erased on ${status.purgeAt.toISOString().slice(0, 10)}.`
+          : "Deletion scheduled.",
+      };
+    });
+  };
+
+  cancelDeletion = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { companyId } = req.params as { companyId: string };
+      const { reason } = req.body as AdminDeletionInput;
+      await this.service.cancelDeletionForCompany(
+        companyId,
+        { id: req.user!.id, email: req.user!.email },
+        reason,
+      );
+      return { data: null, message: "Deletion called off. Nothing will be erased." };
     });
   };
 }

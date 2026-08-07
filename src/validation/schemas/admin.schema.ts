@@ -192,3 +192,19 @@ export interface SetCompInput {
 export interface ReleaseTrialIdentityInput {
   reason: string;
 }
+
+/**
+ * Deletion actioned on a customer's behalf. The reason is REQUIRED — a request that
+ * arrived by email has no other record that it was ever made.
+ */
+export const adminDeletionSchema = Joi.object({
+  reason: Joi.string().trim().min(3).max(255).required().messages({
+    "any.required": "Record who asked for this and how.",
+    "string.empty": "Record who asked for this and how.",
+    "string.min": "Record who asked for this and how.",
+  }),
+});
+
+export interface AdminDeletionInput {
+  reason: string;
+}

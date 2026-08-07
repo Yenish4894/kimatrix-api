@@ -4,6 +4,7 @@ import { superAdminMiddleware } from "@/middleware/auth";
 import { validateRequest, ValidationTarget } from "@/middleware/validation";
 import {
   companyIdParamSchema,
+  adminDeletionSchema,
   createPlanSchema,
   extendTrialSchema,
   releaseTrialIdentitySchema,
@@ -115,6 +116,31 @@ router.post(
   validateRequest(trialIdentityIdParamSchema, ValidationTarget.PARAMS),
   validateRequest(releaseTrialIdentitySchema, ValidationTarget.BODY),
   controller.releaseTrialIdentity,
+);
+
+// ─── Account deletion on a customer's behalf ────────────────────────────────
+//
+// The privacy policy directs customers to request deletion by email. These are what
+// let whoever reads that mailbox actually carry it out — the company-authenticated
+// endpoints require the customer to be logged in, which the emailing customer is not.
+router.get(
+  "/companies/:companyId/deletion-request",
+  validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  controller.getDeletionStatus,
+);
+
+router.post(
+  "/companies/:companyId/deletion-request",
+  validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  validateRequest(adminDeletionSchema, ValidationTarget.BODY),
+  controller.requestDeletion,
+);
+
+router.delete(
+  "/companies/:companyId/deletion-request",
+  validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  validateRequest(adminDeletionSchema, ValidationTarget.BODY),
+  controller.cancelDeletion,
 );
 
 export default router;

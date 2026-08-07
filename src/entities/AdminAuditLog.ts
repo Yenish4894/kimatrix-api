@@ -9,6 +9,11 @@ export const AUDIT_ACTIONS = [
   "plan.enable",
   "plan.disable",
   "setting.update",
+  // Deletion actioned by an admin on a customer's behalf. The request arrives by email
+  // (the privacy policy says so), so the audit row is the ONLY record that it was ever
+  // made — there is no self-service click to point at afterwards.
+  "company.deletion_request",
+  "company.deletion_cancel",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
