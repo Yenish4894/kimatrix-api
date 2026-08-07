@@ -18,6 +18,8 @@ function redisStore(prefix: string): RedisStore {
 }
 
 interface BuildLimiterOptions {
+  /** Requests for which the limiter should not apply at all. */
+  skip?: (req: Request) => boolean;
   prefix: string;
   windowMs: number;
   limit: number;
@@ -44,6 +46,7 @@ function buildLimiter(opts: BuildLimiterOptions) {
     passOnStoreError: true,
     ...(opts.keyGenerator ? { keyGenerator: opts.keyGenerator } : {}),
     ...(opts.skipSuccessfulRequests ? { skipSuccessfulRequests: opts.skipSuccessfulRequests } : {}),
+    ...(opts.skip ? { skip: opts.skip } : {}),
     message: {
       success: false,
       message: opts.message,
@@ -108,6 +111,23 @@ export const globalApiLimiter = buildLimiter({
   windowMs: config.RATE_LIMIT_WINDOW_MS,
   limit: config.RATE_LIMIT_MAX_REQUESTS,
   message: "Too many requests. Please slow down and try again shortly.",
+  /**
+   * The PayPal webhook is exempt.
+   *
+   * Every delivery arrives from PayPal's own IP range, so they all share one rate-limit
+   * key. This limiter is 100 per 15 minutes — and a single renewal day sends at least
+   * two events per renewing customer (BILLING.SUBSCRIPTION.* plus PAYMENT.SALE.*), so
+   * roughly 50 simultaneous renewals is enough to start 429ing.
+   *
+   * A 429 is not a harmless throttle here. PayPal counts a non-2xx as a delivery
+   * failure, retries, and **disables a webhook endpoint that keeps failing** — so the
+   * busiest billing day of the month is exactly when we would lose the ability to
+   * credit payments at all, silently, for every customer at once.
+   *
+   * The endpoint is not unprotected by this: it verifies a PayPal signature before
+   * doing anything, and every event is deduplicated on its event id.
+   */
+  skip: (req) => req.path === "/api/payments/paypal/webhook",
 });
 
 export const loginLimiter = buildLimiter({
