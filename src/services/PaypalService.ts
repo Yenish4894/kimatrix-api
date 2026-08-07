@@ -425,13 +425,26 @@ export class PaypalService {
     return { id: data.id, status: data.status, approvalUrl };
   }
 
-  /** The authoritative state. Always read this back rather than trusting a webhook body. */
-  async getSubscription(subscriptionId: string): Promise<PaypalSubscriptionResource> {
+  /**
+   * The authoritative state. Always read this back rather than trusting a webhook body.
+   *
+   * A 404 returns `null` instead of throwing, and the distinction is load-bearing on
+   * the webhook path. Every other failure is transient, so the caller rethrows and
+   * PayPal retries — but a subscription PayPal itself does not recognise will never
+   * start existing, so treating that as retryable means retrying forever. Observed for
+   * real: PayPal's webhook simulator sends events referencing placeholder ids, and
+   * every one of them produced a 500 and an endless retry.
+   */
+  async getSubscription(subscriptionId: string): Promise<PaypalSubscriptionResource | null> {
     const token = await this.getAccessToken();
     const res = await fetchWithTimeout(
       `${this.baseUrl}/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
+    if (res.status === 404) {
+      logger.warn({ subscriptionId }, "PayPal does not recognise this subscription");
+      return null;
+    }
     if (!res.ok) {
       const { raw } = await parsePaypalError(res);
       logger.error({ status: res.status, body: raw }, "PayPal subscription fetch failed");

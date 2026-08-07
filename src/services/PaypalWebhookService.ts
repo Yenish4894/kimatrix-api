@@ -111,6 +111,7 @@ export class PaypalWebhookService {
         // body is a snapshot from when the event was queued and may already be stale
         // by the time a retry delivers it.
         const remote = await this.paypalService.getSubscription(id);
+        if (!remote) return; // Unknown to PayPal — retrying will never help.
         await this.subscriptionService.applyRemoteState(id, remote, createTime ?? undefined);
         return;
       }
@@ -144,6 +145,7 @@ export class PaypalWebhookService {
         // wrong; the state is reflected as `past_due` and the natural expiry handles
         // the rest if it is never paid.
         const remote = await this.paypalService.getSubscription(billingAgreementId);
+        if (!remote) return;
         await this.subscriptionService.applyRemoteState(
           billingAgreementId,
           remote,

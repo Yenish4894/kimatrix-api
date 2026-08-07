@@ -136,6 +136,9 @@ export class SubscriptionService {
     paypalSubscriptionId: string,
   ): Promise<SubscriptionStatusResult> {
     const remote = await this.paypalService.getSubscription(paypalSubscriptionId);
+    // A null here means PayPal has never heard of this id — almost always a customer
+    // landing back with a hand-edited return URL. Same answer as the ownership check.
+    if (!remote) throw NotFoundError("Subscription not found");
     // `custom_id` is set to our company id at creation and echoed back — this is what
     // stops one company confirming another's subscription by guessing an id.
     if (remote.custom_id && remote.custom_id !== companyId) {
@@ -404,7 +407,7 @@ export class SubscriptionService {
     let effectiveFrom: Date | null = null;
     if (!revised.approvalUrl) {
       const remote = await this.paypalService.getSubscription(sub.paypalSubscriptionId);
-      effectiveFrom = remote.billing_info?.next_billing_time
+      effectiveFrom = remote?.billing_info?.next_billing_time
         ? new Date(remote.billing_info.next_billing_time)
         : null;
       await AppDataSource.getRepository(Subscription).update(sub.id, {
@@ -467,13 +470,11 @@ export class SubscriptionService {
         "Account deactivated by KIMates",
       );
     }
-    await (manager ?? AppDataSource.manager)
-      .getRepository(Subscription)
-      .update(sub.id, {
-        status: "cancelled",
-        cancelledAt: new Date(),
-        cancelReason: "Admin deactivation",
-      });
+    await (manager ?? AppDataSource.manager).getRepository(Subscription).update(sub.id, {
+      status: "cancelled",
+      cancelledAt: new Date(),
+      cancelReason: "Admin deactivation",
+    });
     logger.info(
       { companyId, subscriptionId: sub.id },
       "Subscription cancelled by admin deactivation",
