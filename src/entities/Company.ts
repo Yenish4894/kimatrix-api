@@ -189,6 +189,27 @@ export class Company extends BaseEntity {
   @OneToMany(() => Payment, (payment) => payment.company)
   payments!: Relation<Payment[]>;
 
+  // ── Account deletion ("export and leave") ──
+  //
+  // Set ONLY by an explicit request. Nothing derives these from an expired
+  // subscription: purging on the basis of a lapse would mean a customer who forgets to
+  // renew for a month loses everything.
+
+  @Column({ name: "deletion_requested_at", type: "timestamptz", nullable: true })
+  deletionRequestedAt!: Date | null;
+
+  @ManyToOne(() => User, { nullable: true, onDelete: "SET NULL" })
+  @JoinColumn({ name: "deletion_requested_by_user_id" })
+  deletionRequestedBy!: Relation<User> | null;
+
+  /**
+   * When personal data was erased. The row survives anonymisation so the payment and
+   * subscription records that reference it stay valid — those are the money ledger and
+   * are deliberately retained.
+   */
+  @Column({ name: "anonymized_at", type: "timestamptz", nullable: true })
+  anonymizedAt!: Date | null;
+
   /**
    * The live recurring subscription, if any.
    *

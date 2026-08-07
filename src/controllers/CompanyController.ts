@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { BaseController } from "@/controllers/BaseController";
 import { CompanyService } from "@/services/CompanyService";
+import { AccountDeletionService } from "@/services/AccountDeletionService";
 import { UnauthorizedError } from "@/errors/index";
 import type {
   ListCustomersQueryInput,
@@ -11,6 +12,7 @@ import type {
 
 export class CompanyController extends BaseController {
   private companyService = new CompanyService();
+  private accountDeletionService = new AccountDeletionService();
 
   getProfile = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
@@ -93,6 +95,38 @@ export class CompanyController extends BaseController {
       if (!company) throw UnauthorizedError("Company context missing");
       const { year, month } = req.query as unknown as MonthlyReportQueryInput;
       return { data: await this.companyService.getMonthlyReport(company.id, year, month) };
+    });
+  };
+
+  // ─── Account deletion ("export and leave") ────────────────────────────────
+
+  getDeletionStatus = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const company = req.company;
+      if (!company) throw UnauthorizedError("Company context missing");
+      return { data: await this.accountDeletionService.getStatus(company.id) };
+    });
+  };
+
+  requestDeletion = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const company = req.company;
+      if (!company || !req.user) throw UnauthorizedError("Company context missing");
+      const status = await this.accountDeletionService.requestDeletion(company.id, req.user.id);
+      return {
+        data: status,
+        message:
+          "Your account is scheduled for deletion. You can still download your data, and you can cancel at any time before then.",
+      };
+    });
+  };
+
+  cancelDeletion = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const company = req.company;
+      if (!company) throw UnauthorizedError("Company context missing");
+      await this.accountDeletionService.cancelDeletion(company.id);
+      return { data: null, message: "Your account will not be deleted." };
     });
   };
 }

@@ -11,6 +11,7 @@ import {
   startSubscriptionStatusCron,
   stopSubscriptionStatusCron,
 } from "@/cron/subscriptionStatus.cron";
+import { startAccountDeletionCron, stopAccountDeletionCron } from "@/cron/accountDeletion.cron";
 import { logger } from "@/utils/logger";
 import { getMailer } from "@/config/mailer";
 
@@ -64,6 +65,7 @@ async function start(): Promise<void> {
   startEmailWorker();
   startTokenCleanupCron();
   startSubscriptionStatusCron();
+  startAccountDeletionCron();
 
   const server = app.listen(config.PORT, () => {
     logger.info({ port: config.PORT, env: config.NODE_ENV }, "Server listening");
@@ -85,6 +87,7 @@ async function start(): Promise<void> {
     // bounds it if a client holds a connection open.
     stopTokenCleanupCron();
     stopSubscriptionStatusCron();
+    stopAccountDeletionCron();
     await new Promise<void>((resolve) => {
       server.close(() => {
         logger.info("HTTP server closed");

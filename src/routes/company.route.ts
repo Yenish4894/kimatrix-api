@@ -57,6 +57,14 @@ router.get(
   exportController.exportPurchases,
 );
 
+// Account deletion. Mounted alongside export and for the same reason: a customer
+// whose subscription has lapsed must still be able to close their account and take
+// their data. `requireExportAllowed` gates it because the two belong together —
+// "download and leave" is one action in the customer's mind.
+router.get("/deletion-request", requireExportAllowed, controller.getDeletionStatus);
+router.post("/deletion-request", requireExportAllowed, controller.requestDeletion);
+router.delete("/deletion-request", requireExportAllowed, controller.cancelDeletion);
+
 // data routes — require an active, non-expired subscription
 router.get("/stats", requireActiveSubscription, controller.getStats);
 
