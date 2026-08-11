@@ -8,6 +8,7 @@ import { pingRedis } from "@/config/redis.client";
 import { errorHandler } from "@/middleware/errorHandler";
 import { httpLogger } from "@/middleware/httpLogger";
 import { globalApiLimiter } from "@/middleware/rateLimit";
+import { buildAllowedOrigins } from "@/utils/origins";
 import routes from "@/routes/index";
 
 const app: Express = express();
@@ -23,7 +24,9 @@ app.use(
     hsts: { maxAge: 31_536_000, includeSubDomains: true, preload: true },
   }),
 );
-app.use(cors({ origin: config.FRONTEND_BASE_URL, credentials: true }));
+// Both the apex and the www form — they are separate origins to a browser, and the
+// site answers on both. See utils/origins.ts for what this cost us.
+app.use(cors({ origin: buildAllowedOrigins(config.FRONTEND_BASE_URL), credentials: true }));
 app.use(globalApiLimiter);
 
 app.use(
