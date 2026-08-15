@@ -95,7 +95,7 @@ export class EmailService {
         companyName: input.companyName,
         deadline: input.deadline.toISOString(),
         billingUrl: `${base}/company/billing`,
-        exportUrl: `${base}/company/settings?export=1`,
+        exportUrl: `${base}/company/export`,
       },
       {
         // Deterministic, and keyed on the deadline as well as the kind: a second
