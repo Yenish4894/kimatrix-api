@@ -222,9 +222,14 @@ export const sendBulkEmailSchema = Joi.object({
     "string.empty": "Body is required.",
     "string.max": "Body must be 10,000 characters or fewer.",
   }),
-  companyIds: Joi.array().items(commonPatterns.uuid.required()).min(1).required().messages({
+  // `.items(uuid)` without `.required()` inside: marking the item required makes Joi
+  // emit its own "does not contain 1 required value(s)" for an empty array, which
+  // reached the user verbatim and overrode the copy below. `.min(1)` says the same
+  // thing and lets our wording stand.
+  companyIds: Joi.array().items(commonPatterns.uuid).min(1).required().messages({
     "any.required": "Select at least one company.",
     "array.min": "Select at least one company.",
+    "array.base": "Select at least one company.",
   }),
 }).required();
 
