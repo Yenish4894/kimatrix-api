@@ -1,4 +1,5 @@
 import { config } from "@/config/index";
+import { escapeHtml } from "@/utils/html";
 
 interface EmailVerificationTemplateData {
   verifyUrl: string;
@@ -84,13 +85,4 @@ export function renderEmailVerificationEmail(data: EmailVerificationTemplateData
 </html>`;
 
   return { subject, html, text };
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }

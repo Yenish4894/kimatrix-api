@@ -1,4 +1,5 @@
 import { config } from "@/config/index";
+import { escapeHtml } from "@/utils/html";
 
 interface PasswordResetTemplateData {
   resetUrl: string;
@@ -77,13 +78,4 @@ export function renderPasswordResetEmail(data: PasswordResetTemplateData): Rende
 </html>`;
 
   return { subject, html, text };
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }

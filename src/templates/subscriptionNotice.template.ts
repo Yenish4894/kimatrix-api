@@ -1,4 +1,5 @@
 import { config } from "@/config/index";
+import { escapeHtml } from "@/utils/html";
 import type { ExpiryNoticeKind } from "@/repositories/CompanyRepository";
 
 export interface SubscriptionNoticeTemplateData {
@@ -148,13 +149,4 @@ function formatDeadline(deadline: Date, kind: ExpiryNoticeKind): string {
   if (hours <= 24) return `today (${date})`;
   if (hours <= 48) return `tomorrow (${date})`;
   return `on ${date}`;
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }

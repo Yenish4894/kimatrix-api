@@ -208,3 +208,28 @@ export const adminDeletionSchema = Joi.object({
 export interface AdminDeletionInput {
   reason: string;
 }
+
+// ─── Bulk email ───────────────────────────────────────────────────────────
+
+export const sendBulkEmailSchema = Joi.object({
+  subject: Joi.string().trim().min(1).max(255).required().messages({
+    "any.required": "Subject is required.",
+    "string.empty": "Subject is required.",
+    "string.max": "Subject must be 255 characters or fewer.",
+  }),
+  body: Joi.string().trim().min(1).max(10000).required().messages({
+    "any.required": "Body is required.",
+    "string.empty": "Body is required.",
+    "string.max": "Body must be 10,000 characters or fewer.",
+  }),
+  companyIds: Joi.array().items(commonPatterns.uuid.required()).min(1).required().messages({
+    "any.required": "Select at least one company.",
+    "array.min": "Select at least one company.",
+  }),
+}).required();
+
+export interface SendBulkEmailInput {
+  subject: string;
+  body: string;
+  companyIds: string[];
+}

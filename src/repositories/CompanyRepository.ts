@@ -88,6 +88,15 @@ export class CompanyRepository {
       .getOne();
   }
 
+  async findByIdsWithOwner(ids: string[], manager?: EntityManager): Promise<Company[]> {
+    if (!ids.length) return [];
+    return this.getRepo(manager)
+      .createQueryBuilder("c")
+      .leftJoinAndSelect("c.owner", "owner")
+      .where("c.id IN (:...ids)", { ids })
+      .getMany();
+  }
+
   async findByOwnerUserId(ownerUserId: string, manager?: EntityManager): Promise<Company | null> {
     return this.getRepo(manager)
       .createQueryBuilder("c")

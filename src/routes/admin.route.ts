@@ -15,6 +15,7 @@ import {
   setPlanActiveSchema,
   updatePlanSchema,
   updateSettingsSchema,
+  sendBulkEmailSchema,
 } from "@/validation/schemas/admin.schema";
 
 const router = Router();
@@ -142,5 +143,15 @@ router.delete(
   validateRequest(adminDeletionSchema, ValidationTarget.BODY),
   controller.cancelDeletion,
 );
+
+// ─── Bulk email ───────────────────────────────────────────────────────────
+
+router.post(
+  "/bulk-email",
+  validateRequest(sendBulkEmailSchema, ValidationTarget.BODY),
+  controller.sendBulkEmail,
+);
+
+router.get("/bulk-email/logs", controller.listBulkEmailLogs);
 
 export default router;

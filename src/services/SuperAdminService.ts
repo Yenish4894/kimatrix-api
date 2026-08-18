@@ -1,6 +1,7 @@
 import { AppDataSource } from "data-source";
 import { BadRequestError, NotFoundError } from "@/errors/index";
 import type { Company } from "@/entities/Company";
+import { BulkEmailLog } from "@/entities/BulkEmailLog";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { TrialIdentityRepository } from "@/repositories/TrialIdentityRepository";
 import type { TrialIdentity } from "@/entities/TrialIdentity";
@@ -9,6 +10,7 @@ import { computeEntitlement } from "@/utils/entitlement";
 import { SubscriptionService } from "@/services/SubscriptionService";
 import { AuditService } from "@/services/AuditService";
 import { AccountDeletionService, type DeletionStatus } from "@/services/AccountDeletionService";
+import { EmailService } from "@/services/EmailService";
 import type {
   CompanyBusinessTypeFilter,
   CompanyStatusFilter,
@@ -311,6 +313,75 @@ export class SuperAdminService {
       "Account deletion requested by admin on the customer's behalf",
     );
     return status;
+  }
+
+  // ─── Bulk email ───────────────────────────────────────────────────────────
+
+  async sendBulkEmail(
+    admin: { id: string; email: string },
+    subject: string,
+    body: string,
+    companyIds: string[],
+  ): Promise<{ recipientCount: number; logId: string }> {
+    if (!subject.trim()) throw BadRequestError("Subject is required.");
+    if (!body.trim()) throw BadRequestError("Body is required.");
+    if (!companyIds.length) throw BadRequestError("Select at least one company.");
+
+    // Fetch only the owner emails for the requested companies.
+    const found = await this.companyRepository.findByIdsWithOwner(companyIds);
+    // A company whose owner row is missing would throw on `.owner.email` and take the
+    // whole broadcast down with it. Skip it and deliver to everyone else instead.
+    const companies = found.filter((c) => c.owner?.email);
+    if (!companies.length) throw BadRequestError("No valid companies found.");
+    if (companies.length < found.length) {
+      logger.warn(
+        { requested: companyIds.length, deliverable: companies.length },
+        "Bulk email: some companies have no owner email and were skipped",
+      );
+    }
+
+    const emailService = new EmailService();
+    const repo = AppDataSource.getRepository(BulkEmailLog);
+
+    // Enqueue one job per recipient so individual failures don't block others.
+    await Promise.all(
+      companies.map((c) =>
+        emailService.enqueueBulkEmail({
+          to: c.owner.email,
+          subject: subject.trim(),
+          body: body.trim(),
+        }),
+      ),
+    );
+
+    const log = repo.create({
+      subject: subject.trim(),
+      body: body.trim(),
+      sentByEmail: admin.email,
+      recipientCount: companies.length,
+      recipientIds: companies.map((c) => c.id),
+      sentBy: { id: admin.id } as never,
+    });
+    const saved = await repo.save(log);
+
+    logger.info(
+      { logId: saved.id, adminId: admin.id, recipientCount: companies.length },
+      "Bulk email enqueued",
+    );
+    return { recipientCount: companies.length, logId: saved.id };
+  }
+
+  async listBulkEmailLogs(
+    page: number,
+    limit: number,
+  ): Promise<{ items: BulkEmailLog[]; total: number }> {
+    const repo = AppDataSource.getRepository(BulkEmailLog);
+    const [items, total] = await repo.findAndCount({
+      order: { sentAt: "DESC" },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+    return { items, total };
   }
 
   /** Calls off a pending deletion — for a customer who changed their mind. */

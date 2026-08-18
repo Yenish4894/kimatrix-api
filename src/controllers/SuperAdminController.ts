@@ -5,6 +5,7 @@ import type {
   ReleaseTrialIdentityInput,
   SetCompInput,
   AdminDeletionInput,
+  SendBulkEmailInput,
 } from "@/validation/schemas/admin.schema";
 import type { TrialIdentity } from "@/entities/TrialIdentity";
 import { SuperAdminService } from "@/services/SuperAdminService";
@@ -238,6 +239,33 @@ export class SuperAdminController extends BaseController {
         reason,
       );
       return { data: null, message: "Deletion called off. Nothing will be erased." };
+    });
+  };
+
+  // ─── Bulk email ───────────────────────────────────────────────────────────
+
+  sendBulkEmail = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { subject, body, companyIds } = req.body as SendBulkEmailInput;
+      const result = await this.service.sendBulkEmail(
+        { id: req.user!.id, email: req.user!.email },
+        subject,
+        body,
+        companyIds,
+      );
+      return { data: result, message: `Email queued for ${result.recipientCount} recipient(s).` };
+    });
+  };
+
+  listBulkEmailLogs = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const page = Math.max(1, parseInt((req.query["page"] as string) ?? "1", 10) || 1);
+      const limit = Math.min(
+        50,
+        Math.max(1, parseInt((req.query["limit"] as string) ?? "10", 10) || 10),
+      );
+      const { items, total } = await this.service.listBulkEmailLogs(page, limit);
+      return { data: this.paginationResponse(items, total, page, limit) };
     });
   };
 }

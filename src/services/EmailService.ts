@@ -1,4 +1,5 @@
 import { emailQueue } from "@/queues/email.queue";
+import { escapeHtml } from "@/utils/html";
 import { config } from "@/config/index";
 import { SettingsService } from "@/services/SettingsService";
 import { logger } from "@/utils/logger";
@@ -83,6 +84,25 @@ export class EmailService {
    * send-once marker, so it needs to know to put the notice back — otherwise a Redis
    * blip permanently consumes the customer's only warning email.
    */
+  async enqueueBulkEmail(input: { to: string; subject: string; body: string }): Promise<void> {
+    const html = input.body
+      .split("\n")
+      // Escaped: this is free text an admin typed, going out to every company on the
+      // platform. An unescaped "&" or "<" in ordinary copy — "Terms & Conditions",
+      // "under <500" — corrupts the markup of the whole message.
+      .map(
+        (line) =>
+          `<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#374151;">${escapeHtml(line)}</p>`,
+      )
+      .join("");
+    const job = await emailQueue.add(
+      "generic",
+      { type: "generic", to: input.to, subject: input.subject, html, text: input.body },
+      { jobId: `bulk-${encodeSegment(input.to)}-${Date.now()}` },
+    );
+    logger.info({ jobId: job.id, to: input.to }, "Bulk email enqueued");
+  }
+
   async enqueueSubscriptionNotice(input: SendSubscriptionNoticeInput): Promise<void> {
     const base = config.FRONTEND_BASE_URL.replace(/\/$/, "");
 
