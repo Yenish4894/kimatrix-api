@@ -1,5 +1,5 @@
 import { emailQueue } from "@/queues/email.queue";
-import { escapeHtml } from "@/utils/html";
+import { renderBulkAnnouncementEmail } from "@/templates/bulkAnnouncement.template";
 import { config } from "@/config/index";
 import { SettingsService } from "@/services/SettingsService";
 import { logger } from "@/utils/logger";
@@ -85,19 +85,19 @@ export class EmailService {
    * blip permanently consumes the customer's only warning email.
    */
   async enqueueBulkEmail(input: { to: string; subject: string; body: string }): Promise<void> {
-    const html = input.body
-      .split("\n")
-      // Escaped: this is free text an admin typed, going out to every company on the
-      // platform. An unescaped "&" or "<" in ordinary copy — "Terms & Conditions",
-      // "under <500" — corrupts the markup of the whole message.
-      .map(
-        (line) =>
-          `<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#374151;">${escapeHtml(line)}</p>`,
-      )
-      .join("");
+    // Rendered through the same branded shell as every other email. This used to hand
+    // the mailer bare <p> tags, so a platform-wide announcement arrived unstyled while
+    // a password reset from the same system looked polished.
+    const rendered = renderBulkAnnouncementEmail({ subject: input.subject, body: input.body });
     const job = await emailQueue.add(
       "generic",
-      { type: "generic", to: input.to, subject: input.subject, html, text: input.body },
+      {
+        type: "generic",
+        to: input.to,
+        subject: rendered.subject,
+        html: rendered.html,
+        text: rendered.text,
+      },
       { jobId: `bulk-${encodeSegment(input.to)}-${Date.now()}` },
     );
     logger.info({ jobId: job.id, to: input.to }, "Bulk email enqueued");
