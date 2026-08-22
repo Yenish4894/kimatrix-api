@@ -152,6 +152,10 @@ export class Company extends BaseEntity {
   @Column({ name: "trial_ended_notice_for", type: "timestamptz", nullable: true })
   trialEndedNoticeFor!: Date | null;
 
+  /** When a lapsed company's collected data was erased. See the expiry purge. */
+  @Column({ name: "data_purged_at", type: "timestamptz", nullable: true })
+  dataPurgedAt!: Date | null;
+
   @Column({ name: "subscription_ending_notice_for", type: "timestamptz", nullable: true })
   subscriptionEndingNoticeFor!: Date | null;
 

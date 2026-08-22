@@ -69,6 +69,12 @@ export const config = {
   APP_BASE_URL: process.env["APP_BASE_URL"] ?? "http://localhost:5000",
   FRONTEND_BASE_URL: process.env["FRONTEND_BASE_URL"] ?? "http://localhost:5173",
 
+  /**
+   * Arms the expiry purge. Off unless explicitly "true": this is the only irreversible
+   * operation in the platform and must never start deleting because a deploy happened.
+   */
+  EXPIRY_PURGE_ENABLED: parseBool(process.env["EXPIRY_PURGE_ENABLED"]),
+
   PAYPAL_CLIENT_ID: process.env["PAYPAL_CLIENT_ID"] ?? "",
   PAYPAL_CLIENT_SECRET: process.env["PAYPAL_CLIENT_SECRET"] ?? "",
   PAYPAL_MODE: (process.env["PAYPAL_MODE"] ?? "sandbox") as "sandbox" | "live",
