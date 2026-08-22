@@ -35,7 +35,13 @@ export class ReportService {
     const company = await this.companyRepository.findById(companyId);
     if (!company) throw NotFoundError("Company not found");
 
-    const ctx = { companyName: company.name, country: company.country ?? "" };
+    const ctx = {
+      companyName: company.name,
+      country: company.country ?? "",
+      // Decides whether the reports carry a vehicle column at all. A shop cannot record
+      // one, so for a shop that column is guaranteed blank on every row.
+      businessType: company.businessType,
+    };
     const slug = company.name
       .replaceAll(/[^a-z0-9]+/gi, "-")
       .toLowerCase()

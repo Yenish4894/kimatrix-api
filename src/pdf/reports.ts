@@ -38,6 +38,20 @@ export interface PurchaseRow {
 export interface ReportContext {
   companyName: string;
   country: string;
+  /**
+   * Decides whether the vehicle column appears at all.
+   *
+   * A shop cannot record one — QrService rejects the field outright with "Vehicle
+   * number is not allowed for shop submissions" — so for every shop that column was
+   * guaranteed empty. It was not a data problem but a layout one: an always-blank
+   * column taking width from the names and amounts that carry the meaning.
+   */
+  businessType: "fuel_station" | "shop";
+}
+
+/** Only a fuel station records vehicle numbers, so only its reports show them. */
+function showsVehicle(ctx: ReportContext): boolean {
+  return ctx.businessType === "fuel_station";
 }
 
 const TITLES: Record<ReportKind, string> = {
@@ -224,14 +238,27 @@ export function renderCustomersPdf(rows: CustomerRow[], ctx: ReportContext): Buf
   }
 
   const { margin } = pageSize(doc);
+  const vehicle = showsVehicle(ctx);
+  const spendColumn = vehicle ? 4 : 3;
   autoTable(doc, {
     startY,
-    head: [["#", "Full name", "Mobile", "Vehicle", "Total spend", "Purchases", "First", "Last"]],
+    head: [
+      [
+        "#",
+        "Full name",
+        "Mobile",
+        ...(vehicle ? ["Vehicle"] : []),
+        "Total spend",
+        "Purchases",
+        "First",
+        "Last",
+      ],
+    ],
     body: ranked.map(({ row, rank }) => [
       String(rank),
       row.full_name ?? "",
       row.mobile ?? "",
-      row.vehicle_number ?? "",
+      ...(vehicle ? [row.vehicle_number ?? ""] : []),
       formatPdfCurrency(row.total_invoice_amount, ctx.country),
       String(row.submission_count ?? 0),
       formatDateTime(row.first_submission_at),
@@ -241,11 +268,14 @@ export function renderCustomersPdf(rows: CustomerRow[], ctx: ReportContext): Buf
     margin: { left: margin, right: margin, top: RUNNING_HEADER_HEIGHT, bottom: PAGE.margin + 5 },
     styles: { ...TABLE_STYLES, fontSize: 8.5 },
     headStyles: { ...HEAD_STYLES, fontSize: 8.5 },
+    // columnStyles is keyed by index, and dropping the vehicle column shifts every
+    // column after it. Hard-coded 4 and 5 would style Purchases as the money column
+    // and right-align a date for every shop.
     columnStyles: {
       0: { halign: "center", cellWidth: 12 },
       2: { font: "courier", cellWidth: 34 },
-      4: { halign: "right", cellWidth: 34 },
-      5: { halign: "right", cellWidth: 22 },
+      [spendColumn]: { halign: "right", cellWidth: 34 },
+      [spendColumn + 1]: { halign: "right", cellWidth: 22 },
     },
     alternateRowStyles: { fillColor: [248, 250, 252] },
     rowPageBreak: "avoid",
@@ -272,16 +302,27 @@ export function renderPurchasesPdf(rows: PurchaseRow[], ctx: ReportContext): Buf
   }
 
   const { margin } = pageSize(doc);
+  const vehicle = showsVehicle(ctx);
   autoTable(doc, {
     startY,
-    head: [["#", "Invoice", "Amount", "Customer", "Mobile", "Vehicle", "Submitted"]],
+    head: [
+      [
+        "#",
+        "Invoice",
+        "Amount",
+        "Customer",
+        "Mobile",
+        ...(vehicle ? ["Vehicle"] : []),
+        "Submitted",
+      ],
+    ],
     body: rows.map((row, i) => [
       String(i + 1),
       row.invoice_number ?? "",
       formatPdfCurrency(row.invoice_amount, ctx.country),
       row.full_name_snapshot ?? "",
       row.mobile ?? "",
-      row.vehicle_number_snapshot ?? "",
+      ...(vehicle ? [row.vehicle_number_snapshot ?? ""] : []),
       formatDateTime(row.submitted_at),
     ]),
     theme: "plain",
