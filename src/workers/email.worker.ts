@@ -7,6 +7,7 @@ import { renderPasswordResetEmail } from "@/templates/passwordReset.template";
 import { renderEmailVerificationEmail } from "@/templates/emailVerification.template";
 import { renderSubscriptionNoticeEmail } from "@/templates/subscriptionNotice.template";
 import { logger } from "@/utils/logger";
+import { EXPIRY_RETENTION_DAYS } from "@/config/retention";
 import { hasExhaustedRetries } from "@/workers/retry";
 
 let worker: Worker<EmailJobData> | null = null;
@@ -55,6 +56,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       deadline: new Date(data.deadline),
       billingUrl: data.billingUrl,
       exportUrl: data.exportUrl,
+      retentionDays: EXPIRY_RETENTION_DAYS,
     });
     await mailer.sendMail({
       from: fromAddress(),

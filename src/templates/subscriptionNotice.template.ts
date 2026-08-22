@@ -9,6 +9,8 @@ export interface SubscriptionNoticeTemplateData {
   deadline: Date;
   billingUrl: string;
   exportUrl: string;
+  /** How long data survives after expiry, so the copy and the purge cannot disagree. */
+  retentionDays: number;
 }
 
 interface RenderedEmail {
@@ -18,15 +20,26 @@ interface RenderedEmail {
 }
 
 /**
- * One shell, three messages. Written as a lookup rather than three template files
- * because the layout is identical and only the words change — three copies would
- * drift, and the drift would be invisible until a customer received the wrong one.
+ * One shell, four messages. A lookup rather than four template files: the layout is
+ * identical and only the words change, and four copies would drift invisibly until a
+ * customer received the wrong one.
+ *
+ * A reminder sent BEFORE the deadline never mentions leaving. Every one of these used
+ * to close by inviting the customer to download their data and go — "if you'd rather
+ * stop here", "if you'd rather not continue" — which is an odd thing to put in an
+ * email whose entire purpose is to keep them. The pre-expiry messages now ask for the
+ * renewal and nothing else.
+ *
+ * The post-expiry messages do mention downloads, because at that point the customer
+ * has to be told what happens to their data and how long they have. They still lead
+ * with renewing.
  */
 function copyFor(
   kind: ExpiryNoticeKind,
   brand: string,
   companyName: string,
   when: string,
+  retentionDays: number,
 ): { subject: string; heading: string; body: string[]; cta: string } {
   switch (kind) {
     case "trial_ending":
@@ -35,10 +48,21 @@ function copyFor(
         heading: "Your free trial is nearly up",
         body: [
           `Your free trial for ${companyName} ends ${when}.`,
-          `To keep collecting customer purchases after that, choose a plan. Your QR code stays the same, so there is nothing to reprint and nothing for your customers to relearn.`,
-          `If you'd rather stop here, you can download everything you've collected at any time — it's yours.`,
+          `Choose a plan to keep collecting customer purchases without interruption. Your QR code stays exactly the same, so there is nothing to reprint and nothing for your customers to relearn.`,
+          `Everything you have collected so far carries straight over.`,
         ],
         cta: "Choose a plan",
+      };
+    case "subscription_ending":
+      return {
+        subject: `Your ${brand} plan expires ${when}`,
+        heading: "Your plan is about to expire",
+        body: [
+          `The plan for ${companyName} expires ${when}.`,
+          `Extend it now and nothing changes — your QR code keeps accepting submissions, your dashboard stays open, and your customer list carries on growing.`,
+          `If it lapses, your QR code stops accepting new purchases until you renew.`,
+        ],
+        cta: "Extend your plan",
       };
     case "trial_ended":
       return {
@@ -46,19 +70,19 @@ function copyFor(
         heading: "Your free trial has ended",
         body: [
           `The free trial for ${companyName} ended ${when}, so your QR code has stopped accepting new submissions and your dashboard is paused.`,
-          `Nothing has been deleted. Choose a plan and everything picks up exactly where it left off — same QR code, same customer list.`,
-          `If you'd rather not continue, you can still download all of your data.`,
+          `Choose a plan and everything picks up exactly where it left off — same QR code, same customer list, nothing to set up again.`,
+          `Your data is kept for ${retentionDays} days. Within that time you can renew and have it all back, or download it from your account. After ${retentionDays} days it is deleted.`,
         ],
         cta: "Choose a plan",
       };
     case "subscription_ended":
       return {
-        subject: `Your ${brand} subscription has expired`,
-        heading: "Your subscription has expired",
+        subject: `Your ${brand} plan has expired`,
+        heading: "Your plan has expired",
         body: [
-          `The subscription for ${companyName} expired ${when}, so your QR code has stopped accepting new submissions and your dashboard is paused.`,
-          `Your data is safe and untouched. Renew and everything resumes immediately — same QR code, same customer list.`,
-          `You can also download all of your data at any time.`,
+          `The plan for ${companyName} expired ${when}, so your QR code has stopped accepting new submissions and your dashboard is paused.`,
+          `Renew and everything resumes immediately — same QR code, same customer list, exactly as you left it.`,
+          `Your data is kept for ${retentionDays} days. Within that time you can renew and have it all back, or download it from your account. After ${retentionDays} days it is deleted.`,
         ],
         cta: "Renew your plan",
       };
@@ -68,14 +92,22 @@ function copyFor(
 export function renderSubscriptionNoticeEmail(data: SubscriptionNoticeTemplateData): RenderedEmail {
   const brand = config.SMTP_FROM_NAME || "KIMates";
   const when = formatDeadline(data.deadline, data.kind);
-  const { subject, heading, body, cta } = copyFor(data.kind, brand, data.companyName, when);
+  const isPreExpiry = data.kind === "trial_ending" || data.kind === "subscription_ending";
+  const { subject, heading, body, cta } = copyFor(
+    data.kind,
+    brand,
+    data.companyName,
+    when,
+    data.retentionDays,
+  );
 
   const text = [
     heading,
     "",
     ...body.flatMap((p) => [p, ""]),
     `${cta}: ${data.billingUrl}`,
-    `Download your data: ${data.exportUrl}`,
+    // Only after the deadline. Before it, this email is asking for the renewal.
+    ...(isPreExpiry ? [] : [`Download your data: ${data.exportUrl}`]),
     "",
     `— ${brand}`,
   ].join("\n");
@@ -107,11 +139,15 @@ export function renderSubscriptionNoticeEmail(data: SubscriptionNoticeTemplateDa
                 <a href="${data.billingUrl}" style="display:inline-block;background:#0891B2;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:8px;font-size:15px;font-weight:600;">${escapeHtml(cta)}</a>
               </td>
             </tr>
-            <tr>
+            ${
+              isPreExpiry
+                ? ""
+                : `<tr>
               <td align="center" style="padding:0 40px 24px;font-size:14px;">
-                <a href="${data.exportUrl}" style="color:#0e7490;text-decoration:underline;">Download my data instead</a>
+                <a href="${data.exportUrl}" style="color:#0e7490;text-decoration:underline;">Download your data</a>
               </td>
-            </tr>
+            </tr>`
+            }
             <tr>
               <td style="padding:24px 40px 32px;border-top:1px solid #e5e7eb;font-size:13px;line-height:1.6;color:#6b7280;">
                 <p style="margin:0;">You're receiving this because you own the ${escapeHtml(data.companyName)} account on ${escapeHtml(brand)}.</p>
@@ -143,7 +179,10 @@ function formatDeadline(deadline: Date, kind: ExpiryNoticeKind): string {
     timeZone: "UTC",
   });
 
-  if (kind !== "trial_ending") return `on ${date}`;
+  // Both pre-expiry reminders get the relative phrasing. "expires tomorrow" prompts
+  // action in a way that "expires on 24 August" does not, and the paid reminder is
+  // sent 24 hours out precisely so it can say that.
+  if (kind !== "trial_ending" && kind !== "subscription_ending") return `on ${date}`;
 
   const hours = Math.round((deadline.getTime() - Date.now()) / 3_600_000);
   if (hours <= 24) return `today (${date})`;

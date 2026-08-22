@@ -152,6 +152,9 @@ export class Company extends BaseEntity {
   @Column({ name: "trial_ended_notice_for", type: "timestamptz", nullable: true })
   trialEndedNoticeFor!: Date | null;
 
+  @Column({ name: "subscription_ending_notice_for", type: "timestamptz", nullable: true })
+  subscriptionEndingNoticeFor!: Date | null;
+
   @Column({ name: "subscription_ended_notice_for", type: "timestamptz", nullable: true })
   subscriptionEndedNoticeFor!: Date | null;
 

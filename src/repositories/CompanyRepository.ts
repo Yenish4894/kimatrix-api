@@ -22,7 +22,12 @@ export interface PlatformStats {
   totalShops: number;
 }
 
-export const EXPIRY_NOTICE_KINDS = ["trial_ending", "trial_ended", "subscription_ended"] as const;
+export const EXPIRY_NOTICE_KINDS = [
+  "trial_ending",
+  "subscription_ending",
+  "trial_ended",
+  "subscription_ended",
+] as const;
 export type ExpiryNoticeKind = (typeof EXPIRY_NOTICE_KINDS)[number];
 
 export interface ExpiryNoticeTarget {
@@ -61,6 +66,16 @@ const EXPIRY_NOTICE_SQL: Record<
     due: `c."trial_ends_at" IS NOT NULL
           AND c."trial_ends_at" <= now()
           AND c."subscription_expires_at" IS NULL`,
+  },
+  // A paid plan about to lapse. Trials warned before ending and paid plans did not,
+  // so a paying customer's subscription simply stopped with no warning — the exact
+  // customer most worth keeping. 24 hours, per the product decision.
+  subscription_ending: {
+    column: "subscription_ending_notice_for",
+    deadline: "subscription_expires_at",
+    due: `c."subscription_expires_at" IS NOT NULL
+          AND c."subscription_expires_at" > now()
+          AND c."subscription_expires_at" <= now() + interval '24 hours'`,
   },
   // A paid subscription running out.
   subscription_ended: {
