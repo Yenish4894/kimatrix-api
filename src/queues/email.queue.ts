@@ -20,6 +20,8 @@ export type EmailJobData =
       type: "subscriptionNotice";
       to: string;
       kind: ExpiryNoticeKind;
+      /** Needed to release the notice claim if delivery ultimately fails. */
+      companyId: string;
       companyName: string;
       /** ISO string — BullMQ serialises job data to JSON, so a Date would arrive as one anyway. */
       deadline: string;

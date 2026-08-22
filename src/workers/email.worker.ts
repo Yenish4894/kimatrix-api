@@ -2,10 +2,12 @@ import { Worker, type Job } from "bullmq";
 import { fromAddress, getMailer } from "@/config/mailer";
 import { redisConfig } from "@/config/redis.config";
 import { EMAIL_QUEUE_NAME, type EmailJobData } from "@/queues/email.queue";
+import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { renderPasswordResetEmail } from "@/templates/passwordReset.template";
 import { renderEmailVerificationEmail } from "@/templates/emailVerification.template";
 import { renderSubscriptionNoticeEmail } from "@/templates/subscriptionNotice.template";
 import { logger } from "@/utils/logger";
+import { hasExhaustedRetries } from "@/workers/retry";
 
 let worker: Worker<EmailJobData> | null = null;
 
@@ -80,6 +82,42 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
   throw new Error(`Unknown email job type: ${(data as { type: string }).type}`);
 }
 
+/**
+ * Hand an expiry notice back to the cron after delivery has finally failed.
+ *
+ * The cron claims a notice by stamping `<kind>_notice_for` with the deadline, then
+ * enqueues. It releases that claim if the *enqueue* throws — but an enqueue that
+ * succeeds and a delivery that fails hours later looked identical to success. The
+ * marker stayed set, the claim query skips any company whose marker already equals its
+ * deadline, and the notice was silently gone forever.
+ *
+ * That is not hypothetical: an SMTP outage swallowed a real customer's trial-ended
+ * email, and nothing would ever have sent it.
+ *
+ * The BullMQ job must be removed too. Its id is deterministic — kind, company and
+ * deadline — and `queue.add` treats a matching id as a duplicate and drops it, so a
+ * re-enqueue would silently do nothing while the dead job still existed.
+ */
+async function releaseNoticeClaim(job: Job<EmailJobData>): Promise<void> {
+  const data = job.data;
+  if (data?.type !== "subscriptionNotice" || !data.companyId) return;
+
+  try {
+    await new CompanyRepository().releaseExpiryNotice(data.kind, data.companyId);
+    await job.remove();
+    logger.warn(
+      { jobId: job.id, kind: data.kind, companyId: data.companyId, to: data.to },
+      "Notice delivery failed for good; claim released so the cron will retry it",
+    );
+  } catch (err) {
+    // Leaving the claim set is the bad outcome, so say so loudly rather than swallow.
+    logger.error(
+      { err, jobId: job.id, kind: data.kind, companyId: data.companyId },
+      "Could not release the expiry-notice claim — this notice will not be retried",
+    );
+  }
+}
+
 export function startEmailWorker(): Worker<EmailJobData> {
   if (worker) return worker;
   worker = new Worker<EmailJobData>(EMAIL_QUEUE_NAME, processEmailJob, {
@@ -92,6 +130,7 @@ export function startEmailWorker(): Worker<EmailJobData> {
       { jobId: job?.id, type: job?.data?.type, attempts: job?.attemptsMade, err },
       "Email job failed",
     );
+    if (job && hasExhaustedRetries(job)) void releaseNoticeClaim(job);
   });
 
   worker.on("error", (err) => {

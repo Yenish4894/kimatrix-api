@@ -112,6 +112,7 @@ export class EmailService {
         type: "subscriptionNotice",
         to: input.to,
         kind: input.kind,
+        companyId: input.companyId,
         companyName: input.companyName,
         deadline: input.deadline.toISOString(),
         billingUrl: `${base}/company/billing`,
