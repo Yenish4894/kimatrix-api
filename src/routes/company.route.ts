@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { CompanyController } from "@/controllers/CompanyController";
 import { ExportController } from "@/controllers/ExportController";
+import { ReportController } from "@/controllers/ReportController";
 import { companyMiddleware } from "@/middleware/auth";
 import { requireActiveSubscription, requireExportAllowed } from "@/middleware/subscription";
 import { validateRequest, ValidationTarget } from "@/middleware/validation";
@@ -17,6 +18,7 @@ import {
 const router = Router();
 const controller = new CompanyController();
 const exportController = new ExportController();
+const reportController = new ReportController();
 
 // all company routes require a valid JWT + active company
 router.use(companyMiddleware);
@@ -56,6 +58,13 @@ router.get(
   validateRequest(exportQuerySchema, ValidationTarget.QUERY),
   exportController.exportPurchases,
 );
+
+// PDF reports. Mounted alongside the exports and gated the same way — `canExport`, not
+// `requireActiveSubscription` — because the whole point is that a customer whose plan
+// has lapsed can still take their data with them. The expiry email links here.
+router.get("/reports/top10.pdf", requireExportAllowed, reportController.downloadTop10);
+router.get("/reports/customers.pdf", requireExportAllowed, reportController.downloadCustomers);
+router.get("/reports/transactions.pdf", requireExportAllowed, reportController.downloadPurchases);
 
 // Account deletion. Mounted alongside export and for the same reason: a customer
 // whose subscription has lapsed must still be able to close their account and take

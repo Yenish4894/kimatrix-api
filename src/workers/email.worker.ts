@@ -8,6 +8,7 @@ import { renderEmailVerificationEmail } from "@/templates/emailVerification.temp
 import { renderSubscriptionNoticeEmail } from "@/templates/subscriptionNotice.template";
 import { logger } from "@/utils/logger";
 import { EXPIRY_RETENTION_DAYS } from "@/config/retention";
+import { ReportService } from "@/services/ReportService";
 import { hasExhaustedRetries } from "@/workers/retry";
 
 let worker: Worker<EmailJobData> | null = null;
@@ -58,12 +59,34 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       exportUrl: data.exportUrl,
       retentionDays: EXPIRY_RETENTION_DAYS,
     });
+
+    // The post-expiry emails carry the customer's top ten as a PDF, so the list they
+    // most want survives even if they never log in again. Generated here rather than
+    // enqueued: a PDF in job data would sit base64-encoded in Redis, and it would be a
+    // snapshot from whenever the job was created rather than from when it was sent.
+    //
+    // A report that fails to build must not stop the email — the message itself is the
+    // thing the customer needs, and an attachment is a bonus on top of it.
+    const attachments = [];
+    if (data.kind === "trial_ended" || data.kind === "subscription_ended") {
+      try {
+        const report = await new ReportService().render(data.companyId, "top10");
+        attachments.push({ filename: report.filename, content: report.body });
+      } catch (err) {
+        logger.error(
+          { err, jobId: job.id, companyId: data.companyId },
+          "Could not attach the top-10 report; sending the notice without it",
+        );
+      }
+    }
+
     await mailer.sendMail({
       from: fromAddress(),
       to: data.to,
       subject: rendered.subject,
       html: rendered.html,
       text: rendered.text,
+      ...(attachments.length ? { attachments } : {}),
     });
     logger.info({ jobId: job.id, type: data.type, kind: data.kind, to: data.to }, "Email sent");
     return;
