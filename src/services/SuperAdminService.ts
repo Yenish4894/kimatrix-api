@@ -322,17 +322,21 @@ export class SuperAdminService {
     subject: string,
     body: string,
     companyIds: string[],
+    extraEmails: string[] = [],
   ): Promise<{ recipientCount: number; logId: string }> {
     if (!subject.trim()) throw BadRequestError("Subject is required.");
     if (!body.trim()) throw BadRequestError("Body is required.");
-    if (!companyIds.length) throw BadRequestError("Select at least one company.");
+    if (!companyIds.length && !extraEmails.length) {
+      throw BadRequestError("Select at least one company, or add an email address.");
+    }
 
     // Fetch only the owner emails for the requested companies.
-    const found = await this.companyRepository.findByIdsWithOwner(companyIds);
+    const found = companyIds.length
+      ? await this.companyRepository.findByIdsWithOwner(companyIds)
+      : [];
     // A company whose owner row is missing would throw on `.owner.email` and take the
     // whole broadcast down with it. Skip it and deliver to everyone else instead.
     const companies = found.filter((c) => c.owner?.email);
-    if (!companies.length) throw BadRequestError("No valid companies found.");
     if (companies.length < found.length) {
       logger.warn(
         { requested: companyIds.length, deliverable: companies.length },
@@ -340,17 +344,27 @@ export class SuperAdminService {
       );
     }
 
+    // One address may be both a company owner and typed into the extra box. Sending
+    // the same announcement twice to the same person looks like a broken system, so
+    // the address decides identity, not which list it came from.
+    const seen = new Set<string>();
+    const recipients: string[] = [];
+    for (const address of [...companies.map((c) => c.owner.email), ...extraEmails]) {
+      const key = address.trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      recipients.push(address.trim());
+    }
+
+    if (!recipients.length) throw BadRequestError("No valid recipients found.");
+
     const emailService = new EmailService();
     const repo = AppDataSource.getRepository(BulkEmailLog);
 
     // Enqueue one job per recipient so individual failures don't block others.
     await Promise.all(
-      companies.map((c) =>
-        emailService.enqueueBulkEmail({
-          to: c.owner.email,
-          subject: subject.trim(),
-          body: body.trim(),
-        }),
+      recipients.map((to) =>
+        emailService.enqueueBulkEmail({ to, subject: subject.trim(), body: body.trim() }),
       ),
     );
 
@@ -358,17 +372,26 @@ export class SuperAdminService {
       subject: subject.trim(),
       body: body.trim(),
       sentByEmail: admin.email,
-      recipientCount: companies.length,
+      // What actually went out, not what was asked for — the two differ whenever a
+      // company is skipped or an address appears in both lists.
+      recipientCount: recipients.length,
       recipientIds: companies.map((c) => c.id),
+      extraEmails,
       sentBy: { id: admin.id } as never,
     });
     const saved = await repo.save(log);
 
     logger.info(
-      { logId: saved.id, adminId: admin.id, recipientCount: companies.length },
+      {
+        logId: saved.id,
+        adminId: admin.id,
+        recipientCount: recipients.length,
+        companies: companies.length,
+        extra: extraEmails.length,
+      },
       "Bulk email enqueued",
     );
-    return { recipientCount: companies.length, logId: saved.id };
+    return { recipientCount: recipients.length, logId: saved.id };
   }
 
   async listBulkEmailLogs(

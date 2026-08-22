@@ -2,7 +2,7 @@ import { config } from "@/config/index";
 import { escapeHtml } from "@/utils/html";
 
 interface BulkAnnouncementTemplateData {
-  /** Subject the admin typed — also used as the heading inside the message. */
+  /** Subject the admin typed — also the heading inside the message. */
   subject: string;
   /** Free text the admin typed. Blank lines separate paragraphs. */
   body: string;
@@ -17,29 +17,38 @@ interface RenderedEmail {
 /**
  * The branded shell for an admin broadcast.
  *
- * Bulk email used to be the one message type sent without a template: the body was
- * wrapped in bare <p> tags and handed straight to the mailer. No doctype, no
- * background, no card, no sign-off — so a platform-wide announcement from KIMates
- * arrived looking like a raw HTML fragment, while a password reset from the same
- * system looked polished. This puts it in the same shell as every other email.
+ * Modelled on how established products lay out an announcement: the logo alone at the
+ * top, a heading, the message, then a footer carrying who sent it and how to stop
+ * receiving them. Bulk email was previously the one message type sent with no template
+ * at all — bare <p> tags handed straight to the mailer — so a platform-wide
+ * announcement arrived looking like a raw fragment while a password reset looked
+ * finished.
+ *
+ * Everything is inline-styled tables. Email clients are not browsers: Gmail strips
+ * <style> blocks, Outlook renders through Word, and flexbox does not exist in either.
  */
 export function renderBulkAnnouncementEmail(data: BulkAnnouncementTemplateData): RenderedEmail {
   const brand = config.SMTP_FROM_NAME || "KIMates";
   const subject = data.subject.trim();
+  const site = config.FRONTEND_BASE_URL.replace(/\/+$/, "");
+  const logoUrl = `${site}/brand/kimates-logo.png`;
 
-  // Blank lines separate paragraphs; single newlines stay inside one. Written by
-  // someone typing into a textarea, so it must behave the way a textarea looks.
+  // Blank lines separate paragraphs; a single newline stays inside one. Written by
+  // someone typing into a textarea, so it has to behave the way a textarea looks.
   const paragraphs = data.body
     .replace(/\r\n/g, "\n")
     .split(/\n{2,}/)
     .map((block) => block.trim())
     .filter(Boolean)
     .map(
-      (block) => `<p style="margin:0 0 16px;">${escapeHtml(block).replaceAll("\n", "<br />")}</p>`,
+      (block) =>
+        `<p style="margin:0 0 16px;font-size:15px;line-height:1.65;color:#374151;">${escapeHtml(
+          block,
+        ).replaceAll("\n", "<br />")}</p>`,
     )
     .join("");
 
-  const text = [data.body.trim(), "", `— ${brand}`].join("\n");
+  const text = [data.body.trim(), "", `— ${brand}`, site].join("\n");
 
   const html = `<!doctype html>
 <html lang="en">
@@ -49,31 +58,57 @@ export function renderBulkAnnouncementEmail(data: BulkAnnouncementTemplateData):
     <title>${escapeHtml(subject)}</title>
   </head>
   <body style="margin:0;padding:0;background:#f4f5f7;font-family:Arial,Helvetica,sans-serif;color:#111827;">
+    <!-- Preheader: the grey line a client shows next to the subject in the inbox
+         list. Left unset it fills with whatever markup comes first, which reads as
+         gibberish. Hidden in the body itself. -->
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;">${escapeHtml(subject)}</div>
+
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:32px 0;">
       <tr>
         <td align="center">
-          <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);overflow:hidden;">
+          <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="width:560px;max-width:100%;background:#ffffff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);overflow:hidden;">
+
+            <!-- Logo, centred and alone. The alt text carries the brand for the many clients
+                 that block images by default. -->
             <tr>
-              <td style="padding:20px 40px;background:#0d9488;">
-                <span style="font-size:18px;font-weight:700;color:#ffffff;letter-spacing:0.3px;">${escapeHtml(brand)}</span>
+              <td align="center" style="padding:36px 40px 8px;">
+                <img src="${logoUrl}" alt="${escapeHtml(brand)}" width="150" style="width:150px;max-width:60%;height:auto;border:0;display:block;" />
               </td>
             </tr>
+
             <tr>
-              <td style="padding:32px 40px 8px;">
-                <h1 style="margin:0;font-size:20px;font-weight:600;color:#111827;">${escapeHtml(subject)}</h1>
+              <td style="padding:24px 40px 0;">
+                <h1 style="margin:0;font-size:21px;font-weight:600;line-height:1.35;color:#111827;">${escapeHtml(subject)}</h1>
               </td>
             </tr>
+
             <tr>
-              <td style="padding:8px 40px 24px;font-size:15px;line-height:1.6;color:#374151;">
+              <td style="padding:16px 40px 8px;">
                 ${paragraphs}
               </td>
             </tr>
+
             <tr>
-              <td style="padding:24px 40px 32px;border-top:1px solid #e5e7eb;font-size:13px;line-height:1.6;color:#6b7280;">
-                <p style="margin:0;">You're receiving this because your business has an account with ${escapeHtml(brand)}.</p>
-                <p style="margin:16px 0 0;">— ${escapeHtml(brand)}</p>
+              <td style="padding:8px 40px 32px;">
+                <hr style="border:0;border-top:1px solid #e5e7eb;margin:0;" />
               </td>
             </tr>
+
+            <tr>
+              <td style="padding:0 40px 36px;font-size:12px;line-height:1.7;color:#6b7280;">
+                <p style="margin:0 0 10px;font-weight:600;color:#374151;">${escapeHtml(brand)}</p>
+                <p style="margin:0 0 10px;">Customer purchase tracking for fuel stations and shops.</p>
+                <p style="margin:0 0 10px;">
+                  <a href="${site}" style="color:#0d9488;text-decoration:none;">${escapeHtml(site.replace(/^https?:\/\//, ""))}</a>
+                </p>
+                <p style="margin:0;">
+                  You're receiving this because your business has an account with ${escapeHtml(brand)}.
+                  To stop receiving announcements, turn off promotional email in
+                  <a href="${site}/company/settings" style="color:#0d9488;text-decoration:none;">your settings</a>.
+                </p>
+              </td>
+            </tr>
+
           </table>
         </td>
       </tr>

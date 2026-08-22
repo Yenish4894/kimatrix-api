@@ -246,12 +246,13 @@ export class SuperAdminController extends BaseController {
 
   sendBulkEmail = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
-      const { subject, body, companyIds } = req.body as SendBulkEmailInput;
+      const { subject, body, companyIds, extraEmails } = req.body as SendBulkEmailInput;
       const result = await this.service.sendBulkEmail(
         { id: req.user!.id, email: req.user!.email },
         subject,
         body,
         companyIds,
+        extraEmails,
       );
       return { data: result, message: `Email queued for ${result.recipientCount} recipient(s).` };
     });

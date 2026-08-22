@@ -24,6 +24,10 @@ export class BulkEmailLog extends BaseEntity {
   @Column({ name: "recipient_ids", type: "jsonb", default: [] })
   recipientIds!: string[];
 
+  /** Addresses typed in by hand, belonging to no registered company. */
+  @Column({ name: "extra_emails", type: "jsonb", default: [] })
+  extraEmails!: string[];
+
   @Column({ name: "sent_at", type: "timestamptz", default: () => "now()" })
   sentAt!: Date;
 }

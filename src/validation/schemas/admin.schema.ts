@@ -224,17 +224,44 @@ export const sendBulkEmailSchema = Joi.object({
   }),
   // `.items(uuid)` without `.required()` inside: marking the item required makes Joi
   // emit its own "does not contain 1 required value(s)" for an empty array, which
-  // reached the user verbatim and overrode the copy below. `.min(1)` says the same
-  // thing and lets our wording stand.
-  companyIds: Joi.array().items(commonPatterns.uuid).min(1).required().messages({
-    "any.required": "Select at least one company.",
-    "array.min": "Select at least one company.",
+  // reached the user verbatim and overrode the copy below.
+  //
+  // No longer `.min(1)`: a send can now go to typed-in addresses alone, with no
+  // company selected at all. The "somebody must receive this" rule moved to the
+  // object-level check below, because neither array can enforce it by itself.
+  companyIds: Joi.array().items(commonPatterns.uuid).default([]).messages({
     "array.base": "Select at least one company.",
   }),
-}).required();
+  // Addresses typed in by hand — people who are not registered companies. Capped
+  // because this is a comma-separated box, and a paste of a thousand addresses is a
+  // mistake far more often than an intention.
+  extraEmails: Joi.array()
+    .items(Joi.string().trim().lowercase().email({ tlds: false }).max(255))
+    .max(50)
+    .default([])
+    .messages({
+      "string.email": "One of the extra addresses isn't a valid email.",
+      "array.max": "You can add up to 50 extra addresses at a time.",
+      "array.base": "Extra addresses must be a list.",
+    }),
+})
+  .required()
+  // Enforced here rather than on either array: each one is individually optional, but
+  // sending to nobody is not a thing anyone means to do.
+  .custom((value, helpers) => {
+    const { companyIds, extraEmails } = value as SendBulkEmailInput;
+    if (companyIds.length === 0 && extraEmails.length === 0) {
+      return helpers.error("any.custom");
+    }
+    return value;
+  })
+  .messages({
+    "any.custom": "Select at least one company, or add an email address.",
+  });
 
 export interface SendBulkEmailInput {
   subject: string;
   body: string;
   companyIds: string[];
+  extraEmails: string[];
 }
