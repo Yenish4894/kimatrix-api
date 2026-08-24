@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { unlink } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import multer from "multer";
@@ -51,6 +52,7 @@ const upload = multer({
 export function attachmentUpload(req: Request, res: Response, next: NextFunction): void {
   upload(req, res, (err: unknown) => {
     if (!err) {
+      discardOnFailure(req, res);
       next();
       return;
     }
@@ -69,5 +71,28 @@ export function attachmentUpload(req: Request, res: Response, next: NextFunction
       }
     }
     next(err);
+  });
+}
+
+/**
+ * Deletes the uploaded file if the request does not end in a successful send.
+ *
+ * Multer writes to disk before any validation runs, so a request rejected afterwards —
+ * no recipients, a blank subject, a service error — left its file behind. The weekly
+ * sweep eventually collected it, but an admin fumbling the form three times with 10 MB
+ * files meant 30 MB sitting there for a week for no reason.
+ *
+ * Keyed on the response status rather than on an error object, so it covers every way
+ * a request can fail, including ones added later.
+ */
+function discardOnFailure(req: Request, res: Response): void {
+  res.on("finish", () => {
+    const file = (req as Request & { file?: Express.Multer.File }).file;
+    // 2xx means the send was accepted and the queued jobs still need this file.
+    if (!file || (res.statusCode >= 200 && res.statusCode < 300)) return;
+
+    void unlink(file.path).catch(() => {
+      // Nothing to do about it here; the nightly sweep is the backstop.
+    });
   });
 }
