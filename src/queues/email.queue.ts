@@ -34,6 +34,14 @@ export type EmailJobData =
       subject: string;
       html: string;
       text?: string;
+      /**
+       * A path on disk, never the file's bytes.
+       *
+       * A bulk send enqueues one job per recipient. Embedding a 10 MB attachment in
+       * each would push a gigabyte through Redis for a hundred recipients, and Redis
+       * keeps it in memory. The file is written once and every job points at it.
+       */
+      attachment?: { path: string; filename: string };
     };
 
 export const EMAIL_QUEUE_NAME = "email";

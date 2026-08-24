@@ -84,7 +84,12 @@ export class EmailService {
    * send-once marker, so it needs to know to put the notice back — otherwise a Redis
    * blip permanently consumes the customer's only warning email.
    */
-  async enqueueBulkEmail(input: { to: string; subject: string; body: string }): Promise<void> {
+  async enqueueBulkEmail(input: {
+    to: string;
+    subject: string;
+    body: string;
+    attachment?: { path: string; filename: string };
+  }): Promise<void> {
     // Rendered through the same branded shell as every other email. This used to hand
     // the mailer bare <p> tags, so a platform-wide announcement arrived unstyled while
     // a password reset from the same system looked polished.

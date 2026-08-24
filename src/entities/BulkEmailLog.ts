@@ -28,6 +28,13 @@ export class BulkEmailLog extends BaseEntity {
   @Column({ name: "extra_emails", type: "jsonb", default: [] })
   extraEmails!: string[];
 
+  /** The name the admin uploaded, for the history. Null when nothing was attached. */
+  @Column({ name: "attachment_filename", type: "varchar", length: 255, nullable: true })
+  attachmentFilename!: string | null;
+
+  @Column({ name: "attachment_size", type: "int", nullable: true })
+  attachmentSize!: number | null;
+
   @Column({ name: "sent_at", type: "timestamptz", default: () => "now()" })
   sentAt!: Date;
 }

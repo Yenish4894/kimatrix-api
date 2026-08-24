@@ -2,6 +2,8 @@ import { Router } from "express";
 import { SuperAdminController } from "@/controllers/SuperAdminController";
 import { superAdminMiddleware } from "@/middleware/auth";
 import { validateRequest, ValidationTarget } from "@/middleware/validation";
+import { attachmentUpload } from "@/middleware/attachmentUpload";
+import { parseBulkEmailForm } from "@/middleware/parseBulkEmailForm";
 import {
   companyIdParamSchema,
   adminDeletionSchema,
@@ -148,6 +150,10 @@ router.delete(
 
 router.post(
   "/bulk-email",
+  // Upload runs BEFORE validation: multer is what parses a multipart body, so without
+  // it req.body is empty and every field looks missing.
+  attachmentUpload,
+  parseBulkEmailForm,
   validateRequest(sendBulkEmailSchema, ValidationTarget.BODY),
   controller.sendBulkEmail,
 );

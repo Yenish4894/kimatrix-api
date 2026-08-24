@@ -1,4 +1,5 @@
 import { Worker, type Job } from "bullmq";
+import { readFile } from "node:fs/promises";
 import { fromAddress, getMailer } from "@/config/mailer";
 import { redisConfig } from "@/config/redis.config";
 import { EMAIL_QUEUE_NAME, type EmailJobData } from "@/queues/email.queue";
@@ -93,12 +94,31 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
   }
 
   if (data.type === "generic") {
+    // Read at send time rather than carried through the queue. If the file has been
+    // cleaned up or never landed, the message still goes out — an announcement without
+    // its attachment beats no announcement, and the miss is logged loudly.
+    const attachments = [];
+    if (data.attachment) {
+      try {
+        attachments.push({
+          filename: data.attachment.filename,
+          content: await readFile(data.attachment.path),
+        });
+      } catch (err) {
+        logger.error(
+          { err, jobId: job.id, path: data.attachment.path },
+          "Attachment missing at send time; sending without it",
+        );
+      }
+    }
+
     await mailer.sendMail({
       from: fromAddress(),
       to: data.to,
       subject: data.subject,
       html: data.html,
       ...(data.text ? { text: data.text } : {}),
+      ...(attachments.length ? { attachments } : {}),
     });
     logger.info({ jobId: job.id, type: data.type, to: data.to }, "Email sent");
     return;

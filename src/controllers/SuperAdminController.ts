@@ -247,12 +247,17 @@ export class SuperAdminController extends BaseController {
   sendBulkEmail = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       const { subject, body, companyIds, extraEmails } = req.body as SendBulkEmailInput;
+      // Multipart, so the arrays arrive as strings. A form field cannot express a JSON
+      // array, and silently treating "a,b" as one address would mail nobody.
+      const file = (req as Request & { file?: Express.Multer.File }).file;
+
       const result = await this.service.sendBulkEmail(
         { id: req.user!.id, email: req.user!.email },
         subject,
         body,
         companyIds,
         extraEmails,
+        file ? { path: file.path, filename: file.originalname, size: file.size } : undefined,
       );
       return { data: result, message: `Email queued for ${result.recipientCount} recipient(s).` };
     });

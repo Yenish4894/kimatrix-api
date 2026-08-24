@@ -1,6 +1,7 @@
 import cron, { type ScheduledTask } from "node-cron";
 import { TokenRepository } from "@/repositories/TokenRepository";
 import { logger } from "@/utils/logger";
+import { cleanupExpiredAttachments } from "@/services/AttachmentCleanupService";
 
 const TOKEN_RETENTION_DAYS = 30;
 const SCHEDULE = "0 3 * * *"; // 03:00 every day
@@ -19,6 +20,14 @@ export function startTokenCleanupCron(): void {
         logger.info({ deleted, cutoff }, "Token cleanup cron completed");
       } catch (err) {
         logger.error({ err }, "Token cleanup cron failed");
+      }
+
+      // Same nightly sweep, separate try: a token failure must not skip the file
+      // cleanup, or uploads accumulate on disk indefinitely.
+      try {
+        await cleanupExpiredAttachments();
+      } catch (err) {
+        logger.error({ err }, "Attachment cleanup failed");
       }
     },
     { timezone: "UTC" },

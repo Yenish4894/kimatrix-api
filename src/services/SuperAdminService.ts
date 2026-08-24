@@ -323,6 +323,7 @@ export class SuperAdminService {
     body: string,
     companyIds: string[],
     extraEmails: string[] = [],
+    attachment?: { path: string; filename: string; size: number },
   ): Promise<{ recipientCount: number; logId: string }> {
     if (!subject.trim()) throw BadRequestError("Subject is required.");
     if (!body.trim()) throw BadRequestError("Body is required.");
@@ -361,10 +362,18 @@ export class SuperAdminService {
     const emailService = new EmailService();
     const repo = AppDataSource.getRepository(BulkEmailLog);
 
-    // Enqueue one job per recipient so individual failures don't block others.
+    // Enqueue one job per recipient so individual failures don't block others. Every
+    // job points at the same file on disk rather than carrying a copy of it.
     await Promise.all(
       recipients.map((to) =>
-        emailService.enqueueBulkEmail({ to, subject: subject.trim(), body: body.trim() }),
+        emailService.enqueueBulkEmail({
+          to,
+          subject: subject.trim(),
+          body: body.trim(),
+          ...(attachment
+            ? { attachment: { path: attachment.path, filename: attachment.filename } }
+            : {}),
+        }),
       ),
     );
 
@@ -372,6 +381,8 @@ export class SuperAdminService {
       subject: subject.trim(),
       body: body.trim(),
       sentByEmail: admin.email,
+      attachmentFilename: attachment?.filename ?? null,
+      attachmentSize: attachment?.size ?? null,
       // What actually went out, not what was asked for — the two differ whenever a
       // company is skipped or an address appears in both lists.
       recipientCount: recipients.length,
