@@ -258,6 +258,25 @@ export class PlanService {
       }
 
       // ── Versioned edit ─────────────────────────────────────────────────────
+
+      // Release the predecessor's "popular" flag BEFORE inserting the successor.
+      //
+      // `uq_plans_single_popular` is a partial unique index over `is_popular` where
+      // `is_popular AND archived_at IS NULL`. The successor inherits the flag, so while
+      // the predecessor still holds it and is not yet archived, the insert below puts a
+      // second matching row into that index and Postgres rejects it. The archive that
+      // clears the flag used to run *after* the insert, so it was never reached: the
+      // popular plan could not be repriced at all, which in practice meant the one plan
+      // marked MOST POPULAR had a permanently frozen price.
+      //
+      // The predecessor cannot simply be archived first — `supersededBy` needs the
+      // successor's id, which does not exist yet. Clearing just this flag is enough to
+      // satisfy the index, and both statements share one transaction.
+      const inheritsPopular = input.isPopular ?? plan.isPopular;
+      if (inheritsPopular && plan.isPopular) {
+        await this.planRepository.update(plan.id, { isPopular: false }, manager);
+      }
+
       const successor = await this.planRepository.create(
         {
           name: input.name?.trim() || plan.name,
