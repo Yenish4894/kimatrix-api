@@ -1,4 +1,5 @@
 import { emailQueue } from "@/queues/email.queue";
+import { buildBulkEmailJob } from "@/queues/bulkEmailJob";
 import { renderBulkAnnouncementEmail } from "@/templates/bulkAnnouncement.template";
 import { config } from "@/config/index";
 import { SettingsService } from "@/services/SettingsService";
@@ -96,13 +97,11 @@ export class EmailService {
     const rendered = renderBulkAnnouncementEmail({ subject: input.subject, body: input.body });
     const job = await emailQueue.add(
       "generic",
-      {
-        type: "generic",
+      buildBulkEmailJob({
         to: input.to,
-        subject: rendered.subject,
-        html: rendered.html,
-        text: rendered.text,
-      },
+        rendered,
+        ...(input.attachment ? { attachment: input.attachment } : {}),
+      }),
       { jobId: `bulk-${encodeSegment(input.to)}-${Date.now()}` },
     );
     logger.info({ jobId: job.id, to: input.to }, "Bulk email enqueued");
