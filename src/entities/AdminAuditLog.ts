@@ -14,6 +14,11 @@ export const AUDIT_ACTIONS = [
   // made — there is no self-service click to point at afterwards.
   "company.deletion_request",
   "company.deletion_cancel",
+  // Banning revokes the owner’s sessions, cancels billing, blocks login and is the one
+  // state that also withholds their data export. It is the most destructive thing an
+  // admin can do to a customer, so it belongs here even though it moves no money.
+  "company.ban",
+  "company.unban",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

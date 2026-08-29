@@ -5,6 +5,7 @@ import type {
   ReleaseTrialIdentityInput,
   SetCompInput,
   AdminDeletionInput,
+  CompanyBanInput,
   SendBulkEmailInput,
 } from "@/validation/schemas/admin.schema";
 import type { TrialIdentity } from "@/entities/TrialIdentity";
@@ -46,15 +47,21 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       if (!req.user) throw UnauthorizedError("Admin context missing");
       const companyId = req.params["companyId"] as string;
-      await this.service.deactivateCompany(companyId, req.user.id);
+      const { reason } = req.body as CompanyBanInput;
+      await this.service.deactivateCompany(
+        { id: req.user.id, email: req.user.email },
+        companyId,
+        reason,
+      );
       return { data: null, message: "Company deactivated" };
     });
   };
 
   activateCompany = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
+      if (!req.user) throw UnauthorizedError("Admin context missing");
       const companyId = req.params["companyId"] as string;
-      await this.service.activateCompany(companyId);
+      await this.service.activateCompany({ id: req.user.id, email: req.user.email }, companyId);
       return { data: null, message: "Company activated" };
     });
   };

@@ -197,6 +197,29 @@ export interface ReleaseTrialIdentityInput {
  * Deletion actioned on a customer's behalf. The reason is REQUIRED — a request that
  * arrived by email has no other record that it was ever made.
  */
+/**
+ * Banning demands a stated reason.
+ *
+ * Not bureaucracy: a ban revokes the owner’s sessions, cancels their billing, blocks
+ * login and withholds their data export. One was issued by a misclick 144 seconds after
+ * the same admin extended that company’s trial, and because nothing recorded a reason
+ * it took a dig through three days of log files to establish what had even happened.
+ * Requiring a sentence also puts a deliberate pause in front of the most destructive
+ * button on the screen.
+ */
+export const companyBanSchema = Joi.object({
+  reason: Joi.string().trim().min(3).max(255).required().messages({
+    "any.required": "Say why this company is being banned.",
+    "string.empty": "Say why this company is being banned.",
+    "string.min": "Say why this company is being banned.",
+    "string.max": "Keep the reason under 255 characters.",
+  }),
+});
+
+export interface CompanyBanInput {
+  reason: string;
+}
+
 export const adminDeletionSchema = Joi.object({
   reason: Joi.string().trim().min(3).max(255).required().messages({
     "any.required": "Record who asked for this and how.",

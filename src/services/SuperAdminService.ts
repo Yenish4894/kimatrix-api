@@ -55,7 +55,11 @@ export class SuperAdminService {
     return company;
   }
 
-  async deactivateCompany(companyId: string, adminUserId: string): Promise<void> {
+  async deactivateCompany(
+    actor: { id: string; email: string },
+    companyId: string,
+    reason: string,
+  ): Promise<void> {
     await AppDataSource.transaction(async (manager) => {
       const company = await this.companyRepository.findByIdWithOwner(companyId, manager);
       if (!company) {
@@ -77,11 +81,28 @@ export class SuperAdminService {
       // to log in and stop it.
       await this.subscriptionService.cancelForAdmin(companyId, manager);
 
-      await this.companyRepository.setDeactivated(companyId, adminUserId, manager);
+      await this.companyRepository.setDeactivated(companyId, actor.id, reason, manager);
       await this.tokenRepository.revokeAllRefreshTokensForUser(company.owner.id, manager);
 
+      // Audited because this is not reversible from the customer’s side: their sessions
+      // are gone, they cannot log in to pay, and they cannot export. A real ban once had
+      // to be reconstructed from pm2 logs days later because nothing here recorded it.
+      await this.auditService.record(
+        {
+          actorUserId: actor.id,
+          actorEmail: actor.email,
+          action: "company.ban",
+          entityType: "company",
+          entityId: companyId,
+          before: { subscriptionStatus: company.subscriptionStatus, isActive: company.isActive },
+          after: { subscriptionStatus: "deactivated", isActive: false },
+          note: reason,
+        },
+        manager,
+      );
+
       logger.info(
-        { companyId, adminUserId, ownerUserId: company.owner.id },
+        { companyId, adminUserId: actor.id, ownerUserId: company.owner.id, reason },
         "Company deactivated; owner refresh tokens revoked",
       );
     });
@@ -96,7 +117,10 @@ export class SuperAdminService {
    * off. Now the ban is cleared and `computeEntitlement` decides what the company is
    * actually entitled to, which for an expired account is correctly nothing.
    */
-  async activateCompany(companyId: string): Promise<{ status: string; hasAccess: boolean }> {
+  async activateCompany(
+    actor: { id: string; email: string },
+    companyId: string,
+  ): Promise<{ status: string; hasAccess: boolean }> {
     return AppDataSource.transaction(async (manager) => {
       const company = await this.companyRepository.findById(companyId, manager);
       if (!company) {
@@ -114,6 +138,26 @@ export class SuperAdminService {
       await this.companyRepository.setEntitlementState(
         companyId,
         { isActive: entitlement.hasAccess, subscriptionStatus: entitlement.status },
+        manager,
+      );
+
+      // Captured BEFORE the row is cleared: lifting a ban wipes `deactivatedBy` and
+      // `deactivationReason`, so without this the record of why the company was ever
+      // banned disappears at exactly the moment someone decides it was a mistake.
+      await this.auditService.record(
+        {
+          actorUserId: actor.id,
+          actorEmail: actor.email,
+          action: "company.unban",
+          entityType: "company",
+          entityId: companyId,
+          before: {
+            bannedAt: company.deactivatedAt?.toISOString() ?? null,
+            bannedReason: company.deactivationReason ?? null,
+          },
+          after: { subscriptionStatus: entitlement.status, isActive: entitlement.hasAccess },
+          note: company.deactivationReason ?? null,
+        },
         manager,
       );
 

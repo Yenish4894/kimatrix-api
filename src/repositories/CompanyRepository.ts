@@ -160,6 +160,7 @@ export class CompanyRepository {
   async setDeactivated(
     companyId: string,
     deactivatedByUserId: string,
+    reason: string,
     manager?: EntityManager,
   ): Promise<void> {
     await this.getRepo(manager).update(
@@ -168,6 +169,7 @@ export class CompanyRepository {
         isActive: false,
         deactivatedAt: new Date(),
         deactivatedBy: { id: deactivatedByUserId } as never,
+        deactivationReason: reason,
       },
     );
   }
@@ -185,7 +187,9 @@ export class CompanyRepository {
   async clearDeactivation(companyId: string, manager?: EntityManager): Promise<void> {
     await this.getRepo(manager).update(
       { id: companyId },
-      { deactivatedAt: null, deactivatedBy: null },
+      // The reason goes too — the company is no longer banned, so leaving it set would
+      // read as though it still were. The audit row is what preserves the history.
+      { deactivatedAt: null, deactivatedBy: null, deactivationReason: null },
     );
   }
 

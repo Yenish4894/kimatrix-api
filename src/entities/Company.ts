@@ -114,6 +114,10 @@ export class Company extends BaseEntity {
   @JoinColumn({ name: "deactivated_by_user_id" })
   deactivatedBy!: Relation<User> | null;
 
+  /** Why the ban was issued. Cleared when the ban is lifted; the audit row keeps it. */
+  @Column({ name: "deactivation_reason", type: "varchar", length: 255, nullable: true })
+  deactivationReason!: string | null;
+
   @ManyToOne(() => Plan, { nullable: true, onDelete: "SET NULL" })
   @JoinColumn({ name: "current_plan_id" })
   currentPlan!: Relation<Plan> | null;

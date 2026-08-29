@@ -6,6 +6,7 @@ import { attachmentUpload } from "@/middleware/attachmentUpload";
 import { parseBulkEmailForm } from "@/middleware/parseBulkEmailForm";
 import {
   companyIdParamSchema,
+  companyBanSchema,
   adminDeletionSchema,
   createPlanSchema,
   extendTrialSchema,
@@ -40,6 +41,7 @@ router.get(
 router.patch(
   "/companies/:companyId/deactivate",
   validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  validateRequest(companyBanSchema, ValidationTarget.BODY),
   controller.deactivateCompany,
 );
 router.patch(
