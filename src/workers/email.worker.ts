@@ -7,6 +7,7 @@ import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { renderPasswordResetEmail } from "@/templates/passwordReset.template";
 import { renderEmailVerificationEmail } from "@/templates/emailVerification.template";
 import { renderSubscriptionNoticeEmail } from "@/templates/subscriptionNotice.template";
+import { renderAccountInviteEmail } from "@/templates/accountInvite.template";
 import { logger } from "@/utils/logger";
 import { EXPIRY_RETENTION_DAYS } from "@/config/retention";
 import { ReportService } from "@/services/ReportService";
@@ -39,6 +40,24 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       verifyUrl: data.verifyUrl,
       expiresInMinutes: data.expiresInMinutes,
       trialDurationDays: data.trialDurationDays,
+    });
+    await mailer.sendMail({
+      from: fromAddress(),
+      to: data.to,
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+    });
+    logger.info({ jobId: job.id, type: data.type, to: data.to }, "Email sent");
+    return;
+  }
+
+  if (data.type === "accountInvite") {
+    const rendered = renderAccountInviteEmail({
+      setPasswordUrl: data.setPasswordUrl,
+      companyName: data.companyName,
+      expiresInHours: data.expiresInHours,
+      freeUntil: data.freeUntil ? new Date(data.freeUntil) : null,
     });
     await mailer.sendMail({
       from: fromAddress(),

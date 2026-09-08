@@ -6,6 +6,7 @@ import type {
   SetCompInput,
   AdminDeletionInput,
   CompanyBanInput,
+  CreateCompanyInput,
   SendBulkEmailInput,
 } from "@/validation/schemas/admin.schema";
 import type { TrialIdentity } from "@/entities/TrialIdentity";
@@ -40,6 +41,20 @@ export class SuperAdminController extends BaseController {
       const companyId = req.params["companyId"] as string;
       const company = await this.service.getCompany(companyId);
       return { data: company };
+    });
+  };
+
+  createCompany = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      if (!req.user) throw UnauthorizedError("Admin context missing");
+      const result = await this.service.createCompany(
+        { id: req.user.id, email: req.user.email },
+        req.body as CreateCompanyInput,
+      );
+      return {
+        data: result,
+        message: "Company created. An invite has been emailed to the owner.",
+      };
     });
   };
 

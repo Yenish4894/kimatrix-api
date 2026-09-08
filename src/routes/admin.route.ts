@@ -7,6 +7,7 @@ import { parseBulkEmailForm } from "@/middleware/parseBulkEmailForm";
 import {
   companyIdParamSchema,
   companyBanSchema,
+  createCompanySchema,
   adminDeletionSchema,
   createPlanSchema,
   extendTrialSchema,
@@ -38,6 +39,12 @@ router.get(
   validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
   controller.getCompany,
 );
+router.post(
+  "/companies",
+  validateRequest(createCompanySchema, ValidationTarget.BODY),
+  controller.createCompany,
+);
+
 router.patch(
   "/companies/:companyId/deactivate",
   validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),

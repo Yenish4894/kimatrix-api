@@ -29,6 +29,16 @@ export type EmailJobData =
       exportUrl: string;
     }
   | {
+      type: "accountInvite";
+      to: string;
+      /** A password-reset link. The token type is shared; only the wording differs. */
+      setPasswordUrl: string;
+      companyName: string;
+      expiresInHours: number;
+      /** ISO string, or null for a complimentary period with no end date. */
+      freeUntil: string | null;
+    }
+  | {
       type: "generic";
       to: string;
       subject: string;

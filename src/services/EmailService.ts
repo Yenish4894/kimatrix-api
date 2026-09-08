@@ -107,6 +107,32 @@ export class EmailService {
     logger.info({ jobId: job.id, to: input.to }, "Bulk email enqueued");
   }
 
+  /**
+   * The invite that follows an admin creating a company on someone's behalf.
+   *
+   * Throws rather than swallowing: unlike a password reset, the recipient cannot ask
+   * for this again — they do not know the account exists. A silent failure would leave
+   * a company nobody can ever log into.
+   */
+  async enqueueAccountInvite(input: {
+    to: string;
+    setPasswordToken: string;
+    companyName: string;
+    expiresInHours: number;
+    freeUntil: Date | null;
+  }): Promise<void> {
+    const base = config.FRONTEND_BASE_URL.replace(/\/$/, "");
+    const job = await emailQueue.add("accountInvite", {
+      type: "accountInvite",
+      to: input.to,
+      setPasswordUrl: `${base}/reset-password?token=${encodeURIComponent(input.setPasswordToken)}`,
+      companyName: input.companyName,
+      expiresInHours: input.expiresInHours,
+      freeUntil: input.freeUntil ? input.freeUntil.toISOString() : null,
+    });
+    logger.info({ jobId: job.id, to: input.to }, "Account invite enqueued");
+  }
+
   async enqueueSubscriptionNotice(input: SendSubscriptionNoticeInput): Promise<void> {
     const base = config.FRONTEND_BASE_URL.replace(/\/$/, "");
 

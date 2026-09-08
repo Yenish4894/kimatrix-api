@@ -627,6 +627,19 @@ export class AuthService {
 
       const newHash = await this.passwordService.hash(input.newPassword);
       await this.userRepository.updatePasswordChanged(user.id, newHash, manager);
+
+      // Setting a password from an emailed link proves control of the mailbox, which is
+      // exactly what verification asks for — so an unverified account becomes verified
+      // here rather than being asked to prove the same thing twice.
+      //
+      // This matters most for admin-onboarded companies: they arrive through this path
+      // by design, and without it the dashboard would greet them with a banner urging
+      // them to confirm their email "to start your free trial" — an offer that does not
+      // apply to a comped account and a step they have already completed.
+      if (user.emailVerifiedAt == null) {
+        await this.userRepository.markEmailVerified(user.id, manager);
+      }
+
       await this.tokenRepository.consumePasswordResetToken(tokenRow.id, manager);
       await this.tokenRepository.revokeAllRefreshTokensForUser(user.id, manager);
 

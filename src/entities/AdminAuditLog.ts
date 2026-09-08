@@ -17,6 +17,9 @@ export const AUDIT_ACTIONS = [
   // Banning revokes the owner’s sessions, cancels billing, blocks login and is the one
   // state that also withholds their data export. It is the most destructive thing an
   // admin can do to a customer, so it belongs here even though it moves no money.
+  // Onboarding a company on someone's behalf grants free access and creates an
+  // account the operator controls the first credential for, so it is recorded.
+  "company.create",
   "company.ban",
   "company.unban",
 ] as const;

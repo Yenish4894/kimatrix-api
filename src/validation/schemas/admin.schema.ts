@@ -1,5 +1,5 @@
 import Joi from "joi";
-import { commonPatterns, paginationSchema } from "./common.schema";
+import { addressFields, commonPatterns, paginationSchema } from "./common.schema";
 
 const COMPANY_STATUS_FILTERS = ["all", "active", "inactive"] as const;
 const BUSINESS_TYPE_FILTERS = ["all", "fuel_station", "shop"] as const;
@@ -207,6 +207,60 @@ export interface ReleaseTrialIdentityInput {
  * Requiring a sentence also puts a deliberate pause in front of the most destructive
  * button on the screen.
  */
+/**
+ * Onboarding a company from the admin side.
+ *
+ * The business fields mirror public registration so both paths produce identical rows.
+ * What is absent matters as much: no password (the owner sets their own from an emailed
+ * link, so an operator never handles a customer's credential), no username (nothing to
+ * collide on and no name for an admin to invent), and no terms checkbox — the operator
+ * is accepting on the customer's behalf and the record says so.
+ */
+export const createCompanySchema = Joi.object({
+  name: commonPatterns.name.required(),
+  streetAddress: addressFields.streetAddress.required(),
+  city: addressFields.city.required(),
+  state: addressFields.state.required(),
+  country: addressFields.country.required(),
+  postalCode: addressFields.postalCode.optional().allow(null, ""),
+  registrationNumber: Joi.string().trim().min(3).max(128).required(),
+  contactEmail: commonPatterns.email.required(),
+  contactPhone: commonPatterns.phoneE164.required(),
+  whatsappNumber: commonPatterns.phoneE164.optional().allow(null, ""),
+  businessType: Joi.string().valid("fuel_station", "shop").required(),
+  email: commonPatterns.email.required().messages({
+    "any.required": "The owner's login email is required — the invite is sent there.",
+  }),
+  // null = complimentary access with no end date. Allowed, but the form defaults to a
+  // date so that free access resurfaces for a decision rather than becoming permanent
+  // by omission.
+  compedUntil: Joi.date().iso().greater("now").required().allow(null).messages({
+    "date.greater": "The free-access date must be in the future.",
+  }),
+  compReason: Joi.string().trim().min(3).max(255).required().messages({
+    "any.required": "Record why this company is being given free access.",
+    "string.empty": "Record why this company is being given free access.",
+    "string.min": "Record why this company is being given free access.",
+  }),
+});
+
+export interface CreateCompanyInput {
+  name: string;
+  streetAddress: string;
+  city: string;
+  state: string;
+  country: string;
+  postalCode?: string | null;
+  registrationNumber: string;
+  contactEmail: string;
+  contactPhone: string;
+  whatsappNumber?: string | null;
+  businessType: "fuel_station" | "shop";
+  email: string;
+  compedUntil: string | null;
+  compReason: string;
+}
+
 export const companyBanSchema = Joi.object({
   reason: Joi.string().trim().min(3).max(255).required().messages({
     "any.required": "Say why this company is being banned.",
