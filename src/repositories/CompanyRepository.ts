@@ -385,6 +385,18 @@ export class CompanyRepository {
    * no expiry to warn about, and telling a company an admin just banned that its
    * trial is ending is noise at best.
    *
+   * Guards on `email_verified_at IS NOT NULL` because mailing an address nobody ever
+   * confirmed is how this system lost all outbound email. On 2026-09-08 this query
+   * selected two junk signups - test@gmail.com and tvb@gmail.com - Gmail rejected both
+   * with 550, and Hostinger suspended sending for the entire mailbox seconds later.
+   * Password resets, email verification and every real customer's notice went down with
+   * it, and nothing in the platform noticed for hours.
+   *
+   * Nothing is lost by skipping them: an unverified address has never demonstrated it
+   * can receive anything, so the message was not going to arrive either way. And because
+   * the send-once marker is only stamped on rows this query returns, a company that
+   * verifies later still receives its notice if one is still due.
+   *
    * Callers MUST enqueue outside the surrounding transaction, and call
    * `releaseExpiryNotice` if the enqueue fails — see the cron for why.
    */
@@ -402,6 +414,7 @@ export class CompanyRepository {
           AND c."deactivated_at" IS NULL
           AND c."is_comped" = false
           AND u."is_active" = true
+          AND u."email_verified_at" IS NOT NULL
           AND ${spec.due}
           AND c."${spec.column}" IS DISTINCT FROM c."${spec.deadline}"
       RETURNING c."id"            AS company_id,

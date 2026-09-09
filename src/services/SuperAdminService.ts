@@ -377,12 +377,37 @@ export class SuperAdminService {
     companyId: string,
     days: number,
     adminUserId: string,
-  ): Promise<{ trialEndsAt: Date; status: SubscriptionStatus }> {
+  ): Promise<{
+    trialEndsAt: Date;
+    status: SubscriptionStatus;
+    /** False when the owner never confirmed their email — see the note below. */
+    ownerEmailVerified: boolean;
+  }> {
     return AppDataSource.transaction(async (manager) => {
-      const company = await this.companyRepository.findById(companyId, manager);
+      const company = await this.companyRepository.findByIdWithOwner(companyId, manager);
       if (!company) throw NotFoundError("Company not found");
       if (company.deactivatedAt != null) {
         throw BadRequestError("Reactivate this company before granting a trial.");
+      }
+
+      // Reported, not blocked.
+      //
+      // A self-serve trial only starts once the owner confirms their email, which is
+      // what keeps unreal addresses out of the mail pipeline. Granting a trial here
+      // walks around that check — which is how test@gmail.com and tvb@gmail.com came
+      // to hold trials, and in turn how the expiry cron came to email two addresses
+      // that did not exist and got the mailbox suspended.
+      //
+      // Blocking outright would be wrong: granting a trial to someone the operator has
+      // spoken to directly is a legitimate thing to do. But the admin should know the
+      // consequence, because expiry notices now deliberately skip unverified owners:
+      // this company will receive no warning before its trial lapses.
+      const ownerEmailVerified = company.owner?.emailVerifiedAt != null;
+      if (!ownerEmailVerified) {
+        logger.warn(
+          { companyId, adminUserId, ownerEmail: company.owner?.email },
+          "Trial granted to a company whose owner has not confirmed their email — it will receive no expiry notices",
+        );
       }
 
       const now = new Date();
@@ -399,7 +424,7 @@ export class SuperAdminService {
       );
 
       logger.info({ companyId, adminUserId, days, trialEndsAt }, "Trial extended by admin");
-      return { trialEndsAt, status: entitlement.status };
+      return { trialEndsAt, status: entitlement.status, ownerEmailVerified };
     });
   }
 

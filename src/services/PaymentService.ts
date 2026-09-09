@@ -92,9 +92,17 @@ export class PaymentService {
   }
 
   async capturePayment(companyId: string, paypalOrderId: string): Promise<CapturePaymentResult> {
-    // Quick non-locking check — avoids acquiring a row lock for already-completed payments
+    // Quick non-locking check — avoids acquiring a row lock for already-completed payments.
+    //
+    // Scoped to the caller's company. `findByPaypalOrderId` is not company-scoped, and
+    // without the ownership test this branch answered for somebody else's payment: pass
+    // a captured order id belonging to another company and it returned that payment's id
+    // and subscription dates. PayPal order ids are not secret — they arrive as a query
+    // parameter on the return URL — so this was reachable, not theoretical. The
+    // `claimForCapture` path below already scopes by company; this shortcut did not, and
+    // the retry branch a few lines down checks ownership explicitly. Same rule, all three.
     const existing = await this.paymentRepository.findByPaypalOrderId(paypalOrderId);
-    if (existing?.status === "captured") {
+    if (existing?.status === "captured" && existing.company.id === companyId) {
       return {
         paymentId: existing.id,
         subscriptionStartsAt: existing.subscriptionStartsAt!,

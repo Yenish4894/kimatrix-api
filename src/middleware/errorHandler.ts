@@ -66,7 +66,15 @@ export const InternalError = (message = "Internal server error") =>
 const COLUMN_TO_FRIENDLY: Record<string, { field: string; message: string }> = {
   email: {
     field: "email",
-    message: "This email is already registered. Try logging in instead.",
+    // Reaching THIS path means the application-level check already passed and the
+    // database still refused — which is what happens for a soft-deleted account:
+    // `users.email` is unique with no `deleted_at` filter, while TypeORM's lookups
+    // exclude soft-deleted rows. "Try logging in instead" is a dead end for those
+    // people, because the row they would log into is deleted. The wording therefore
+    // has to hold for both cases: an address in use, and an address that cannot be
+    // reused. (The live-account path in AuthService keeps its own, friendlier copy.)
+    message:
+      "This email is already registered. If you can't sign in with it, please contact support.",
   },
   username: {
     field: "username",
