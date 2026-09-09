@@ -125,6 +125,17 @@ export class PlanService {
       // the billing page can't end up showing two currencies side by side.
       const currency = await this.settingsService.getPlatformCurrency(manager);
 
+      // Release the badge BEFORE inserting, not after.
+      //
+      // `uq_plans_single_popular` is a partial unique index over `is_popular`. Another
+      // plan always holds the badge, so an insert carrying `is_popular = true` violated
+      // it and the tidy-up below was never reached: ticking "Most popular" while
+      // creating a plan failed every single time, with the generic "Some of your
+      // details are already in use" and nothing pointing at the cause.
+      if (input.isPopular === true) {
+        await this.clearAllPopular(manager);
+      }
+
       const created = await this.planRepository.create(
         {
           name,
@@ -138,10 +149,6 @@ export class PlanService {
         },
         manager,
       );
-
-      if (created.isPopular) {
-        await this.clearOtherPopular(created.id, manager);
-      }
 
       await this.auditService.record(
         {
@@ -235,8 +242,11 @@ export class PlanService {
           patch.sortOrder = input.durationDays;
         }
 
+        // Same reason as create: the UPDATE that sets the badge collides with whoever
+        // currently holds it, so it has to be released first. Promoting an existing
+        // plan to "Most popular" failed for exactly this reason.
+        if (patch.isPopular) await this.clearAllPopular(manager, plan.id);
         await this.planRepository.update(plan.id, patch, manager);
-        if (patch.isPopular) await this.clearOtherPopular(plan.id, manager);
 
         const updated = await this.planRepository.findByIdAnyState(plan.id, manager);
         await this.auditService.record(
@@ -400,5 +410,25 @@ export class PlanService {
       `UPDATE "plans" SET "is_popular" = false WHERE "id" <> $1 AND "is_popular" = true`,
       [keepPlanId],
     );
+  }
+
+  /**
+   * Releases the "most popular" badge from every plan that currently holds it, so a
+   * write that claims the badge cannot collide with the incumbent.
+   *
+   * Called BEFORE the insert or update, which is the whole point: the index is
+   * enforced by Postgres at write time, so clearing afterwards never runs.
+   * `exceptPlanId` exists for the in-place edit, where the row being promoted may
+   * already hold the badge and must not be cleared out from under itself.
+   */
+  private async clearAllPopular(manager: EntityManager, exceptPlanId?: string): Promise<void> {
+    if (exceptPlanId) {
+      await manager.query(
+        `UPDATE "plans" SET "is_popular" = false WHERE "is_popular" = true AND "id" <> $1`,
+        [exceptPlanId],
+      );
+      return;
+    }
+    await manager.query(`UPDATE "plans" SET "is_popular" = false WHERE "is_popular" = true`);
   }
 }

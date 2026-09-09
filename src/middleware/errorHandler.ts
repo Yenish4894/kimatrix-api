@@ -88,6 +88,10 @@ const COLUMN_TO_FRIENDLY: Record<string, { field: string; message: string }> = {
     field: "qrToken",
     message: "QR code conflict. Please try again.",
   },
+  is_popular: {
+    field: "isPopular",
+    message: "Another plan is already marked most popular. Clear that one first.",
+  },
   invoice_number: {
     field: "invoiceNumber",
     message: "This invoice number has already been submitted for this company.",
@@ -113,7 +117,11 @@ function mapUniqueViolationToFriendly(detail: string | undefined): {
   // Postgres detail format: `Key (col)=(value) already exists.` or `Key (col1, col2)=(v1, v2) already exists.`
   const match = /^Key \(([^)]+)\)=/.exec(detail);
   if (!match) return generic;
-  const columns = match[1]!.split(",").map((c) => c.trim());
+  // Strip parentheses. A unique index over an EXPRESSION reports its detail as
+  // `Key ((is_popular))=(t) already exists.`, so the naive split yields "(is_popular"
+  // and matches nothing — which is why a real, explainable conflict surfaced to the
+  // admin as the generic "Some of your details are already in use".
+  const columns = match[1]!.split(",").map((c) => c.trim().replace(/[()]/g, ""));
   for (const col of columns) {
     const friendly = COLUMN_TO_FRIENDLY[col];
     if (friendly) return friendly;
