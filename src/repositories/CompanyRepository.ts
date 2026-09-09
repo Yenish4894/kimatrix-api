@@ -46,12 +46,30 @@ export interface ExpiryNoticeTarget {
  * Interpolated into SQL, so every value here must stay a hard-coded literal; none of
  * it is ever caller-supplied.
  */
-const EXPIRY_NOTICE_SQL: Record<
+export const EXPIRY_NOTICE_SQL: Record<
   ExpiryNoticeKind,
-  { column: string; deadline: string; due: string }
+  {
+    column: string;
+    deadline: string;
+    due: string;
+    /**
+     * Whether the owner's email must be confirmed before we will write to it.
+     *
+     * True for the trial notices and false for the paid ones, because the two carry
+     * opposite risks. Junk signups collect in trials — that is where test@gmail.com and
+     * tvb@gmail.com sat until the cron mailed them and got the mailbox suspended. But a
+     * company that has actually paid has proved it is real, and there are few of them:
+     * silently letting a paying customer's plan lapse with no warning is a worse outcome
+     * than the rare bounce, and is the exact failure `subscription_ending` was added to
+     * prevent. A customer can also register, skip verification and pay directly, so
+     * "paid" and "verified" genuinely are independent.
+     */
+    requiresVerifiedEmail: boolean;
+  }
 > = {
   // Two days out, and only while the trial is still live.
   trial_ending: {
+    requiresVerifiedEmail: true,
     column: "trial_ending_notice_for",
     deadline: "trial_ends_at",
     due: `c."trial_ends_at" IS NOT NULL
@@ -61,6 +79,7 @@ const EXPIRY_NOTICE_SQL: Record<
   },
   // The moment it lapses. `subscription_expires_at IS NULL` skips anyone who converted.
   trial_ended: {
+    requiresVerifiedEmail: true,
     column: "trial_ended_notice_for",
     deadline: "trial_ends_at",
     due: `c."trial_ends_at" IS NOT NULL
@@ -71,6 +90,7 @@ const EXPIRY_NOTICE_SQL: Record<
   // so a paying customer's subscription simply stopped with no warning — the exact
   // customer most worth keeping. 24 hours, per the product decision.
   subscription_ending: {
+    requiresVerifiedEmail: false,
     column: "subscription_ending_notice_for",
     deadline: "subscription_expires_at",
     due: `c."subscription_expires_at" IS NOT NULL
@@ -79,6 +99,7 @@ const EXPIRY_NOTICE_SQL: Record<
   },
   // A paid subscription running out.
   subscription_ended: {
+    requiresVerifiedEmail: false,
     column: "subscription_ended_notice_for",
     deadline: "subscription_expires_at",
     due: `c."subscription_expires_at" IS NOT NULL
@@ -414,7 +435,7 @@ export class CompanyRepository {
           AND c."deactivated_at" IS NULL
           AND c."is_comped" = false
           AND u."is_active" = true
-          AND u."email_verified_at" IS NOT NULL
+          ${spec.requiresVerifiedEmail ? 'AND u."email_verified_at" IS NOT NULL' : ""}
           AND ${spec.due}
           AND c."${spec.column}" IS DISTINCT FROM c."${spec.deadline}"
       RETURNING c."id"            AS company_id,
