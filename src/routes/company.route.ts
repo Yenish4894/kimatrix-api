@@ -13,6 +13,7 @@ import {
   purchaseIdParamSchema,
   exportQuerySchema,
   updateProfileSchema,
+  setQrPausedSchema,
 } from "@/validation/schemas/company.schema";
 
 const router = Router();
@@ -29,6 +30,15 @@ router.put(
   "/profile",
   validateRequest(updateProfileSchema, ValidationTarget.BODY),
   controller.updateProfile,
+);
+
+// The company's own QR on/off switch. Mounted with profile rather than inside the
+// subscription block: pausing grants nothing, and a lapsed company must still be able
+// to stop its printed poster collecting entries it cannot see.
+router.patch(
+  "/qr/paused",
+  validateRequest(setQrPausedSchema, ValidationTarget.BODY),
+  controller.setQrPaused,
 );
 
 // ─────────────────────────────────────────────────────────────────────────────

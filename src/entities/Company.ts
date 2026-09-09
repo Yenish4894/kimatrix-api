@@ -78,6 +78,16 @@ export class Company extends BaseEntity {
   @Column({ name: "qr_token", type: "varchar", length: 64 })
   qrToken!: string;
 
+  /**
+   * When the company itself paused submissions. NULL means live.
+   *
+   * Distinct from every subscription field: this is the business saying "not right
+   * now", not the platform saying "you are not entitled". The customer-facing screens
+   * differ accordingly, and support needs to be able to tell the two apart.
+   */
+  @Column({ name: "qr_paused_at", type: "timestamptz", nullable: true })
+  qrPausedAt!: Date | null;
+
   @Column({ name: "contact_email", type: "varchar", length: 255 })
   contactEmail!: string;
 

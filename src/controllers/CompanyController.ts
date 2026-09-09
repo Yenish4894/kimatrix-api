@@ -4,6 +4,7 @@ import { CompanyService } from "@/services/CompanyService";
 import { AccountDeletionService } from "@/services/AccountDeletionService";
 import { UnauthorizedError } from "@/errors/index";
 import type {
+  SetQrPausedInput,
   ListCustomersQueryInput,
   ListPurchasesQueryInput,
   MonthlyReportQueryInput,
@@ -13,6 +14,20 @@ import type {
 export class CompanyController extends BaseController {
   private companyService = new CompanyService();
   private accountDeletionService = new AccountDeletionService();
+
+  setQrPaused = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const company = req.company!;
+      const { paused } = req.body as SetQrPausedInput;
+      const result = await this.companyService.setQrPaused(company.id, paused);
+      return {
+        data: result,
+        message: paused
+          ? "QR code paused. Customers cannot submit entries until you resume it."
+          : "QR code is live again. Customers can submit entries.",
+      };
+    });
+  };
 
   getProfile = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {

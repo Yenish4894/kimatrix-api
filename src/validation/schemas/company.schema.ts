@@ -116,3 +116,20 @@ export interface MonthlyReportQueryInput {
   year: number;
   month: number;
 }
+
+/**
+ * The company's own on/off switch for QR submissions.
+ *
+ * An explicit `paused` boolean rather than a toggle endpoint: two staff members with
+ * the page open would otherwise flip each other's change, and a retried request would
+ * undo itself. Stating the desired end state makes the call idempotent.
+ */
+export const setQrPausedSchema = Joi.object({
+  paused: Joi.boolean().required().messages({
+    "any.required": "Specify whether the QR code should be paused.",
+  }),
+});
+
+export interface SetQrPausedInput {
+  paused: boolean;
+}

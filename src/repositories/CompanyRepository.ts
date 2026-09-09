@@ -205,6 +205,14 @@ export class CompanyRepository {
    * dashboard and a live QR code without any payment, until the hourly cron happened to
    * notice and switch it back off.
    */
+  async setQrPaused(
+    companyId: string,
+    qrPausedAt: Date | null,
+    manager?: EntityManager,
+  ): Promise<void> {
+    await this.getRepo(manager).update({ id: companyId }, { qrPausedAt });
+  }
+
   async clearDeactivation(companyId: string, manager?: EntityManager): Promise<void> {
     await this.getRepo(manager).update(
       { id: companyId },

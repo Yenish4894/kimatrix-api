@@ -1,5 +1,6 @@
 import { config } from "@/config/index";
 import { NotFoundError } from "@/errors/index";
+import { logger } from "@/utils/logger";
 import type { Company, SubscriptionStatus } from "@/entities/Company";
 import { computeEntitlement } from "@/utils/entitlement";
 import type { Customer } from "@/entities/Customer";
@@ -33,6 +34,8 @@ export interface CompanyProfile {
   joinedAt: Date;
   qrToken: string;
   qrUrl: string;
+  /** When the company paused its own QR code. Null means live. */
+  qrPausedAt: Date | null;
   subscriptionExpiresAt: Date | null;
 
   // ── Entitlement, computed server-side ──
@@ -133,6 +136,31 @@ export class CompanyService {
    * `findByOwnerUserId` does not join the owner relation — the caller already has
    * the authenticated user on the request.
    */
+  /**
+   * Turns QR submissions off or back on at the company's own request.
+   *
+   * Idempotent: pausing an already-paused code keeps the original timestamp rather
+   * than resetting it, so "paused since" stays true across a double click or a retried
+   * request. Resuming an already-live code is a no-op rather than an error, for the
+   * same reason — a customer pressing a button twice is not a failure worth surfacing.
+   *
+   * Deliberately allowed regardless of subscription state. Pausing changes nothing a
+   * lapsed company could otherwise do, and refusing would mean a business that stopped
+   * paying could not take its own poster out of service.
+   */
+  async setQrPaused(companyId: string, paused: boolean): Promise<{ qrPausedAt: Date | null }> {
+    const company = await this.companyRepository.findById(companyId);
+    if (!company) throw NotFoundError("Company not found");
+
+    if (paused && company.qrPausedAt != null) return { qrPausedAt: company.qrPausedAt };
+    if (!paused && company.qrPausedAt == null) return { qrPausedAt: null };
+
+    const qrPausedAt = paused ? new Date() : null;
+    await this.companyRepository.setQrPaused(companyId, qrPausedAt);
+    logger.info({ companyId, paused }, paused ? "QR submissions paused" : "QR submissions resumed");
+    return { qrPausedAt };
+  }
+
   getProfile(company: Company, emailVerifiedAt?: Date | null): CompanyProfile {
     const entitlement = computeEntitlement(company, new Date());
     return {
@@ -153,6 +181,7 @@ export class CompanyService {
       joinedAt: company.joinedAt,
       qrToken: company.qrToken,
       qrUrl: this.buildQrUrl(company.qrToken),
+      qrPausedAt: company.qrPausedAt,
       subscriptionExpiresAt: company.subscriptionExpiresAt,
       hasAccess: entitlement.hasAccess,
       subscriptionStatus: entitlement.status,

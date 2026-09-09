@@ -26,6 +26,16 @@ export interface QrResolveResult {
    * the customer only discovered the problem after filling it in and pressing submit.
    */
   isAcceptingSubmissions: boolean;
+  /**
+   * True only when the company itself paused submissions.
+   *
+   * Kept separate from `isAcceptingSubmissions` so the scan page can say "this
+   * business has paused entries, check back soon" rather than the vague wording used
+   * when the reason is billing. Safe to disclose — a shop choosing to pause is not
+   * confidential, whereas a lapsed subscription is, and this endpoint is public and
+   * unauthenticated.
+   */
+  pausedByCompany: boolean;
   /** Drives the currency symbol on the customer form. */
   country: string;
 }
@@ -60,7 +70,11 @@ export class QrService {
       companyId: company.id,
       companyName: company.name,
       businessType: company.businessType,
-      isAcceptingSubmissions: computeEntitlement(company, new Date()).hasAccess,
+      // Both must hold: the platform must be willing to serve them, and they must
+      // not have paused themselves.
+      isAcceptingSubmissions:
+        computeEntitlement(company, new Date()).hasAccess && company.qrPausedAt == null,
+      pausedByCompany: company.qrPausedAt != null,
       country: company.country,
     };
   }
@@ -74,6 +88,15 @@ export class QrService {
       const company = await this.companyRepository.findByQrToken(qrToken, manager);
       if (!company) {
         throw NotFoundError("QR code not recognized");
+      }
+      // Checked before entitlement so a paused shop gets the accurate message rather
+      // than one implying a billing problem. Enforced here and not only on the resolve
+      // endpoint: the form is a public page anyone can POST to directly, and a
+      // customer who loaded it moments before the pause would otherwise still submit.
+      if (company.qrPausedAt != null) {
+        throw BadRequestError(
+          "This business has paused new entries for now. Please check back soon.",
+        );
       }
       if (!computeEntitlement(company, new Date()).hasAccess) {
         throw BadRequestError("This company is not currently accepting submissions");
