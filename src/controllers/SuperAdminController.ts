@@ -189,7 +189,7 @@ export class SuperAdminController extends BaseController {
           reason: input.reason ?? null,
           ...(input.drawSpins !== undefined ? { drawSpins: input.drawSpins } : {}),
         },
-        req.user!.id,
+        { id: req.user!.id, email: req.user!.email },
       );
       return {
         data: result,

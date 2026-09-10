@@ -445,8 +445,9 @@ export class SuperAdminService {
       reason: string | null;
       drawSpins?: number;
     },
-    adminUserId: string,
+    actor: { id: string; email: string },
   ): Promise<{ status: SubscriptionStatus; hasAccess: boolean }> {
+    const adminUserId = actor.id;
     return AppDataSource.transaction(async (manager) => {
       const company = await this.companyRepository.findById(companyId, manager);
       if (!company) throw NotFoundError("Company not found");
@@ -486,6 +487,28 @@ export class SuperAdminService {
       await this.companyRepository.setEntitlementState(
         companyId,
         { isActive: entitlement.hasAccess, subscriptionStatus: entitlement.status },
+        manager,
+      );
+
+      await this.auditService.record(
+        {
+          actorUserId: actor.id,
+          actorEmail: actor.email,
+          action: params.isComped ? "company.comp" : "company.uncomp",
+          entityType: "company",
+          entityId: companyId,
+          before: {
+            isComped: company.isComped,
+            compedUntil: company.compedUntil ? new Date(company.compedUntil).toISOString() : null,
+            drawSpins: company.compDrawSpins,
+          },
+          after: {
+            isComped: params.isComped,
+            compedUntil: compedUntil ? new Date(compedUntil).toISOString() : null,
+            drawSpins,
+          },
+          note: params.isComped ? (params.reason?.trim() ?? null) : null,
+        },
         manager,
       );
 

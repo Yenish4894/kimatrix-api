@@ -20,6 +20,10 @@ export const AUDIT_ACTIONS = [
   // Onboarding a company on someone's behalf grants free access and creates an
   // account the operator controls the first credential for, so it is recorded.
   "company.create",
+  // Free access replaces payment outright, so granting, changing and removing it are
+  // money decisions: who, until when and why must be answerable without reading logs.
+  "company.comp",
+  "company.uncomp",
   "company.ban",
   "company.unban",
 ] as const;

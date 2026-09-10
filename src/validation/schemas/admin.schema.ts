@@ -174,9 +174,18 @@ export const setCompSchema = Joi.object({
     }),
   // Null means perpetual. Deliberately allowed — some accounts genuinely are free
   // forever — but it is the caller's explicit choice, never a default.
-  compedUntil: Joi.date().iso().greater("now").allow(null).optional().messages({
-    "date.greater": "Choose a date in the future.",
-  }),
+  // Required when granting — the comment above always said perpetual must be the
+  // caller's explicit choice, but an omitted field used to fall through to null and so
+  // silently granted free access forever.
+  compedUntil: Joi.date()
+    .iso()
+    .greater("now")
+    .allow(null)
+    .when("isComped", { is: true, then: Joi.required(), otherwise: Joi.optional() })
+    .messages({
+      "date.greater": "Choose a date in the future.",
+      "any.required": "Choose an end date, or explicitly choose no end date.",
+    }),
 });
 
 export const releaseTrialIdentitySchema = Joi.object({
