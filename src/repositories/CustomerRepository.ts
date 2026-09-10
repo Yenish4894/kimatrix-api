@@ -162,24 +162,41 @@ export class CustomerRepository {
     return repo.save(repo.create(data));
   }
 
-  async getPlatformAggregates(
-    manager?: EntityManager,
-  ): Promise<{ totalCustomers: number; totalPurchases: number; totalSpend: string }> {
-    const raw = await this.getRepo(manager)
-      .createQueryBuilder("c")
-      .select("COUNT(c.id)", "total_customers")
-      .addSelect("COALESCE(SUM(c.submission_count), 0)", "total_purchases")
-      .addSelect("COALESCE(SUM(c.total_invoice_amount), 0)", "total_spend")
-      .getRawOne<{
-        total_customers: string;
-        total_purchases: string;
-        total_spend: string;
-      }>();
+  async getPlatformAggregates(manager?: EntityManager): Promise<{
+    totalCustomers: number;
+    totalPurchases: number;
+    totalSpend: string;
+    spendByCountry: { country: string; total: string }[];
+  }> {
+    const [raw, byCountry] = await Promise.all([
+      this.getRepo(manager)
+        .createQueryBuilder("c")
+        .select("COUNT(c.id)", "total_customers")
+        .addSelect("COALESCE(SUM(c.submission_count), 0)", "total_purchases")
+        .addSelect("COALESCE(SUM(c.total_invoice_amount), 0)", "total_spend")
+        .getRawOne<{
+          total_customers: string;
+          total_purchases: string;
+          total_spend: string;
+        }>(),
+      // Purchase amounts are in each company's local currency (rand in South Africa,
+      // rupees in India), so `total_spend` above adds unlike amounts together. This
+      // breakdown is what the admin dashboard shows; the sum stays for compatibility.
+      this.getRepo(manager)
+        .createQueryBuilder("c")
+        .innerJoin("c.company", "co")
+        .select("co.country", "country")
+        .addSelect("COALESCE(SUM(c.total_invoice_amount), 0)", "total")
+        .groupBy("co.country")
+        .orderBy("SUM(c.total_invoice_amount)", "DESC")
+        .getRawMany<{ country: string; total: string }>(),
+    ]);
 
     return {
       totalCustomers: Number(raw?.total_customers ?? 0),
       totalPurchases: Number(raw?.total_purchases ?? 0),
       totalSpend: raw?.total_spend ?? "0",
+      spendByCountry: byCountry.map((r) => ({ country: r.country, total: r.total })),
     };
   }
 }

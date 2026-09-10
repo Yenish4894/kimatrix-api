@@ -39,6 +39,8 @@ export interface PlatformStatsResult extends PlatformStats {
   totalCustomers: number;
   totalPurchases: number;
   totalSpend: string;
+  /** Spend per company country; amounts are in that country's currency. */
+  spendByCountry: { country: string; total: string }[];
 }
 
 export class SuperAdminService {
