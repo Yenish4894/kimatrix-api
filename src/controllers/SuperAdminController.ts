@@ -187,6 +187,7 @@ export class SuperAdminController extends BaseController {
           isComped: input.isComped,
           compedUntil: input.compedUntil ?? null,
           reason: input.reason ?? null,
+          ...(input.drawSpins !== undefined ? { drawSpins: input.drawSpins } : {}),
         },
         req.user!.id,
       );

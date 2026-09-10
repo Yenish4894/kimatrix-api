@@ -60,6 +60,14 @@ export class Plan extends BaseEntity {
   isPopular!: boolean;
 
   /**
+   * Lucky draw spins a buyer of this plan receives. 0 means the plan has no draw —
+   * which is every plan until the admin opts one in. Selling the draw is done by
+   * offering a variant of a plan with spins at a higher price.
+   */
+  @Column({ name: "draw_spins", type: "int", default: 0 })
+  drawSpins!: number;
+
+  /**
    * Set when a plan is superseded or retired. Archived plans never appear in the
    * public list, but remain readable so old payments and subscriptions still resolve.
    */

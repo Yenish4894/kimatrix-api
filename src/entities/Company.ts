@@ -197,6 +197,14 @@ export class Company extends BaseEntity {
   @Column({ name: "comp_reason", type: "varchar", length: 255, nullable: true })
   compReason!: string | null;
 
+  /** Lucky draw spins granted with a comp. Paid companies get theirs from payments. */
+  @Column({ name: "comp_draw_spins", type: "int", default: 0 })
+  compDrawSpins!: number;
+
+  /** Opens the comp draw window: purchases before this are not in the pool. */
+  @Column({ name: "comp_draw_spins_granted_at", type: "timestamptz", nullable: true })
+  compDrawSpinsGrantedAt!: Date | null;
+
   @ManyToOne(() => User, { nullable: true, onDelete: "SET NULL" })
   @JoinColumn({ name: "comp_granted_by_user_id" })
   compGrantedBy!: Relation<User> | null;

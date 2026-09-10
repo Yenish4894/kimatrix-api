@@ -17,6 +17,7 @@ export interface PlanDto {
   isActive: boolean;
   isPopular: boolean;
   sortOrder: number;
+  drawSpins: number;
   archivedAt: Date | null;
   supersededByPlanId: string | null;
   supersedesPlanId: string | null;
@@ -33,6 +34,7 @@ export interface CreatePlanInput {
   isPopular?: boolean;
   sortOrder?: number;
   isActive?: boolean;
+  drawSpins?: number;
 }
 
 export interface UpdatePlanInput {
@@ -42,6 +44,7 @@ export interface UpdatePlanInput {
   price?: string;
   isPopular?: boolean;
   sortOrder?: number;
+  drawSpins?: number;
 }
 
 export interface Actor {
@@ -64,6 +67,7 @@ function toDto(plan: Plan): PlanDto {
     isActive: plan.isActive,
     isPopular: plan.isPopular,
     sortOrder: plan.sortOrder,
+    drawSpins: plan.drawSpins ?? 0,
     archivedAt: plan.archivedAt,
     supersededByPlanId: plan.supersededBy?.id ?? null,
     supersedesPlanId: plan.supersedes?.id ?? null,
@@ -146,6 +150,7 @@ export class PlanService {
           isActive: input.isActive ?? true,
           isPopular: input.isPopular ?? false,
           sortOrder: input.sortOrder ?? input.durationDays,
+          drawSpins: input.drawSpins ?? 0,
         },
         manager,
       );
@@ -230,6 +235,9 @@ export class PlanService {
         if (input.isPopular !== undefined) patch.isPopular = input.isPopular;
         if (nextPrice !== undefined) patch.price = nextPrice;
         if (input.durationDays !== undefined) patch.durationDays = input.durationDays;
+        // Not a billing change: payments snapshot their own spins, so editing this in
+        // place never alters what anyone already bought.
+        if (input.drawSpins !== undefined) patch.drawSpins = input.drawSpins;
 
         // Sort order defaults to the duration on create. If it was never overridden and
         // the duration changes, carry it across — otherwise editing a 30-day plan to 365
@@ -308,6 +316,7 @@ export class PlanService {
               ? input.durationDays
               : plan.sortOrder),
           supersedes: { id: plan.id } as Plan,
+          drawSpins: input.drawSpins ?? plan.drawSpins,
         } as Partial<Plan>,
         manager,
       );

@@ -10,6 +10,8 @@ import { BadRequestError, ConflictError, NotFoundError } from "@/errors/index";
 import type { Plan } from "@/entities/Plan";
 
 export interface PlanDto {
+  /** Lucky draw spins the plan includes, so the billing page can say so. */
+  drawSpins: number;
   id: string;
   name: string;
   description: string | null;
@@ -80,6 +82,7 @@ export class PaymentService {
       status: "pending",
       amount: Number(plan.price),
       currency: plan.currency,
+      drawSpins: plan.drawSpins ?? 0,
     });
 
     logger.info({ companyId, planId, paypalOrderId: order.id }, "PayPal order created");
@@ -314,6 +317,7 @@ export class PaymentService {
       isPopular: plan.isPopular,
       sortOrder: plan.sortOrder,
       isRecurring: plan.isRecurring === true && plan.paypalPlanId != null,
+      drawSpins: plan.drawSpins ?? 0,
     };
   }
 }

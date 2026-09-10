@@ -61,6 +61,10 @@ export const createPlanSchema = Joi.object({
   isPopular: Joi.boolean().optional(),
   isActive: Joi.boolean().optional(),
   sortOrder: Joi.number().integer().min(0).max(9999).optional(),
+  drawSpins: Joi.number().integer().min(0).max(100).optional().messages({
+    "number.max": "A plan can include at most 100 lucky draw spins.",
+    "number.min": "Lucky draw spins can't be negative.",
+  }),
 }).required();
 
 export interface CreatePlanBody {
@@ -71,6 +75,7 @@ export interface CreatePlanBody {
   isPopular?: boolean;
   isActive?: boolean;
   sortOrder?: number;
+  drawSpins?: number;
 }
 
 export const updatePlanSchema = Joi.object({
@@ -80,6 +85,10 @@ export const updatePlanSchema = Joi.object({
   price: planPrice.optional(),
   isPopular: Joi.boolean().optional(),
   sortOrder: Joi.number().integer().min(0).max(9999).optional(),
+  drawSpins: Joi.number().integer().min(0).max(100).optional().messages({
+    "number.max": "A plan can include at most 100 lucky draw spins.",
+    "number.min": "Lucky draw spins can't be negative.",
+  }),
 })
   .min(1)
   .required()
@@ -92,6 +101,7 @@ export interface UpdatePlanBody {
   price?: string;
   isPopular?: boolean;
   sortOrder?: number;
+  drawSpins?: number;
 }
 
 export const planIdParamSchema = Joi.object({
@@ -148,6 +158,7 @@ export const extendTrialSchema = Joi.object({
 
 export const setCompSchema = Joi.object({
   isComped: Joi.boolean().strict().required(),
+  drawSpins: Joi.number().integer().min(0).max(100).optional(),
   // Required when granting, ignored when revoking. Enforced here AND in the service:
   // the service is the one that runs for any future caller that skips this schema.
   reason: Joi.string()
@@ -184,6 +195,7 @@ export interface ExtendTrialInput {
 }
 
 export interface SetCompInput {
+  drawSpins?: number;
   isComped: boolean;
   reason?: string | null;
   compedUntil?: Date | null;
@@ -242,6 +254,7 @@ export const createCompanySchema = Joi.object({
     "string.empty": "Record why this company is being given free access.",
     "string.min": "Record why this company is being given free access.",
   }),
+  compDrawSpins: Joi.number().integer().min(0).max(100).optional(),
 });
 
 export interface CreateCompanyInput {
@@ -259,6 +272,7 @@ export interface CreateCompanyInput {
   email: string;
   compedUntil: string | null;
   compReason: string;
+  compDrawSpins?: number;
 }
 
 export const companyBanSchema = Joi.object({

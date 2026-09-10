@@ -87,6 +87,10 @@ router.delete("/deletion-request", requireExportAllowed, controller.cancelDeleti
 // data routes — require an active, non-expired subscription
 router.get("/stats", requireActiveSubscription, controller.getStats);
 
+// Lucky draw — needs a live plan: spins only exist inside a paid or comped window.
+router.get("/draws", requireActiveSubscription, controller.getDraws);
+router.post("/draws/spin", requireActiveSubscription, controller.spinDraw);
+
 router.get(
   "/customers",
   requireActiveSubscription,

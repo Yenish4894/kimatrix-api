@@ -16,6 +16,7 @@ export class PaymentRepository {
       status: PaymentStatus;
       amount: number;
       currency: string;
+      drawSpins?: number;
     },
     manager?: EntityManager,
   ): Promise<Payment> {
@@ -28,6 +29,7 @@ export class PaymentRepository {
         status: data.status,
         amount: String(data.amount),
         currency: data.currency,
+        drawSpins: data.drawSpins ?? 0,
         capturedAt: null,
         subscriptionStartsAt: null,
         subscriptionEndsAt: null,

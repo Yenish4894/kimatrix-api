@@ -16,6 +16,7 @@ export interface PlanPatch {
   isActive?: boolean;
   isPopular?: boolean;
   sortOrder?: number;
+  drawSpins?: number;
   archivedAt?: Date | null;
   supersedes?: { id: string } | null;
   supersededBy?: { id: string } | null;

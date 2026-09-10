@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { BaseController } from "@/controllers/BaseController";
 import { CompanyService } from "@/services/CompanyService";
+import { LuckyDrawService } from "@/services/LuckyDrawService";
 import { AccountDeletionService } from "@/services/AccountDeletionService";
 import { UnauthorizedError } from "@/errors/index";
 import type {
@@ -14,6 +15,21 @@ import type {
 export class CompanyController extends BaseController {
   private companyService = new CompanyService();
   private accountDeletionService = new AccountDeletionService();
+  private luckyDrawService = new LuckyDrawService();
+
+  getDraws = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const status = await this.luckyDrawService.getStatus(req.company!.id);
+      return { data: status };
+    });
+  };
+
+  spinDraw = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const result = await this.luckyDrawService.spin(req.company!.id, req.user!.id);
+      return { data: result, message: `${result.winner.fullName} wins the lucky draw!` };
+    });
+  };
 
   setQrPaused = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {

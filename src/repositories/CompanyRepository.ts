@@ -274,6 +274,8 @@ export class CompanyRepository {
       compedUntil: Date | null;
       reason: string | null;
       grantedByUserId: string | null;
+      drawSpins: number;
+      drawSpinsGrantedAt: Date | null;
     },
     manager?: EntityManager,
   ): Promise<void> {
@@ -284,6 +286,8 @@ export class CompanyRepository {
         compedUntil: params.compedUntil,
         compReason: params.reason,
         compGrantedBy: params.grantedByUserId ? ({ id: params.grantedByUserId } as never) : null,
+        compDrawSpins: params.drawSpins,
+        compDrawSpinsGrantedAt: params.drawSpinsGrantedAt,
       },
     );
   }

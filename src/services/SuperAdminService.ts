@@ -139,6 +139,8 @@ export class SuperAdminService {
           compedUntil,
           compReason: input.compReason.trim(),
           compGrantedBy: { id: actor.id } as never,
+          compDrawSpins: input.compDrawSpins ?? 0,
+          compDrawSpinsGrantedAt: (input.compDrawSpins ?? 0) > 0 ? now : null,
         },
         manager,
       );
@@ -437,7 +439,12 @@ export class SuperAdminService {
    */
   async setComp(
     companyId: string,
-    params: { isComped: boolean; compedUntil: Date | null; reason: string | null },
+    params: {
+      isComped: boolean;
+      compedUntil: Date | null;
+      reason: string | null;
+      drawSpins?: number;
+    },
     adminUserId: string,
   ): Promise<{ status: SubscriptionStatus; hasAccess: boolean }> {
     return AppDataSource.transaction(async (manager) => {
@@ -449,6 +456,16 @@ export class SuperAdminService {
 
       const compedUntil = params.isComped ? params.compedUntil : null;
 
+      // Omitting spins leaves them as they are; revoking the comp revokes them too.
+      const drawSpins = params.isComped ? (params.drawSpins ?? company.compDrawSpins ?? 0) : 0;
+      // The draw window opens when spins are first granted and stays put while they
+      // are merely adjusted — otherwise topping up a spin would quietly re-admit the
+      // customers who already won.
+      const keepWindow =
+        company.isComped && company.compDrawSpins > 0 && company.compDrawSpinsGrantedAt != null;
+      const drawSpinsGrantedAt =
+        drawSpins === 0 ? null : keepWindow ? company.compDrawSpinsGrantedAt : new Date();
+
       await this.companyRepository.setComp(
         {
           companyId,
@@ -456,6 +473,8 @@ export class SuperAdminService {
           compedUntil,
           reason: params.isComped ? (params.reason?.trim() ?? null) : null,
           grantedByUserId: params.isComped ? adminUserId : null,
+          drawSpins,
+          drawSpinsGrantedAt,
         },
         manager,
       );

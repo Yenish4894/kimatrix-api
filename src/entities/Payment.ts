@@ -82,6 +82,13 @@ export class Payment extends BaseEntity {
   @Column({ name: "subscription_ends_at", type: "timestamptz", nullable: true })
   subscriptionEndsAt!: Date | null;
 
+  /**
+   * The plan's spins at the moment this order was created — snapshotted like
+   * `amount`, so an admin editing the plan later never changes what was bought.
+   */
+  @Column({ name: "draw_spins", type: "int", default: 0 })
+  drawSpins!: number;
+
   @Column({ name: "paypal_response", type: "jsonb", nullable: true })
   paypalResponse!: Record<string, unknown> | null;
 }
