@@ -67,7 +67,7 @@ function toDto(plan: Plan): PlanDto {
     isActive: plan.isActive,
     isPopular: plan.isPopular,
     sortOrder: plan.sortOrder,
-    drawSpins: plan.drawSpins ?? 0,
+    drawSpins: 0,
     archivedAt: plan.archivedAt,
     supersededByPlanId: plan.supersededBy?.id ?? null,
     supersedesPlanId: plan.supersedes?.id ?? null,
@@ -150,7 +150,7 @@ export class PlanService {
           isActive: input.isActive ?? true,
           isPopular: input.isPopular ?? false,
           sortOrder: input.sortOrder ?? input.durationDays,
-          drawSpins: input.drawSpins ?? 0,
+          drawSpins: 0,
         },
         manager,
       );
@@ -237,7 +237,7 @@ export class PlanService {
         if (input.durationDays !== undefined) patch.durationDays = input.durationDays;
         // Not a billing change: payments snapshot their own spins, so editing this in
         // place never alters what anyone already bought.
-        if (input.drawSpins !== undefined) patch.drawSpins = input.drawSpins;
+        // Spins are never included with a plan. They are paid add-ons at checkout.
 
         // Sort order defaults to the duration on create. If it was never overridden and
         // the duration changes, carry it across — otherwise editing a 30-day plan to 365
@@ -316,7 +316,7 @@ export class PlanService {
               ? input.durationDays
               : plan.sortOrder),
           supersedes: { id: plan.id } as Plan,
-          drawSpins: input.drawSpins ?? plan.drawSpins,
+          drawSpins: 0,
         } as Partial<Plan>,
         manager,
       );

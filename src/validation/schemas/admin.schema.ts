@@ -133,6 +133,11 @@ export const updateSettingsSchema = Joi.object({
     .messages({
       "string.pattern.base": "Enter a valid three-letter currency code, for example ZAR.",
     }),
+  spinAddonPriceUsd: Joi.number().positive().max(100).precision(2).optional().messages({
+    "number.base": "Enter a price for the spin add-on.",
+    "number.positive": "The spin price must be greater than zero.",
+    "number.max": "The spin price cannot exceed USD 100.",
+  }),
 })
   .min(1)
   .required()
@@ -141,6 +146,7 @@ export const updateSettingsSchema = Joi.object({
 export interface UpdateSettingsBody {
   trialDurationDays?: number;
   platformCurrency?: string;
+  spinAddonPriceUsd?: number;
 }
 
 // ─── Subscription / trial administration ────────────────────────────────────

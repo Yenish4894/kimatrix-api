@@ -9,12 +9,16 @@ import type { EntityManager } from "typeorm";
 export interface PlatformSettings {
   trialDurationDays: number;
   platformCurrency: string;
+  spinAddonPriceUsd: number;
 }
 
 /** Guard rails on the trial length. Wide enough to be useful, narrow enough that a
  *  fat-fingered "700" cannot hand out a two-year free trial. */
 export const TRIAL_DURATION_MIN = 1;
 export const TRIAL_DURATION_MAX = 90;
+
+export const SPIN_PRICE_MIN = 0.01;
+export const SPIN_PRICE_MAX = 100;
 
 /**
  * Currencies PayPal will actually settle in. A bare /^[A-Z]{3}$/ check let an admin
@@ -92,6 +96,7 @@ export class SettingsService {
     const settings: PlatformSettings = {
       trialDurationDays: config.TRIAL_DURATION_DAYS,
       platformCurrency: "USD",
+      spinAddonPriceUsd: 3,
     };
 
     try {
@@ -111,6 +116,16 @@ export class SettingsService {
           }
         } else if (row.key === "platform_currency" && CURRENCY_PATTERN.test(row.value)) {
           settings.platformCurrency = row.value;
+        } else if (row.key === "spin_addon_price_usd") {
+          const parsed = Number.parseFloat(row.value);
+          if (Number.isFinite(parsed) && parsed >= SPIN_PRICE_MIN && parsed <= SPIN_PRICE_MAX) {
+            settings.spinAddonPriceUsd = parsed;
+          } else {
+            logger.warn(
+              { value: row.value },
+              "Invalid spin_addon_price_usd setting; using default",
+            );
+          }
         }
       }
     } catch (err) {
@@ -134,6 +149,10 @@ export class SettingsService {
 
   async getPlatformCurrency(manager?: EntityManager): Promise<string> {
     return (await this.getSettings(manager)).platformCurrency;
+  }
+
+  async getSpinAddonPriceUsd(manager?: EntityManager): Promise<number> {
+    return (await this.getSettings(manager)).spinAddonPriceUsd;
   }
 
   async setTrialDurationDays(
@@ -204,6 +223,28 @@ export class SettingsService {
     return normalized;
   }
 
+  /** Price of one lucky draw spin add-on, stored to the cent. Only USD: PayPal cannot settle ZAR. */
+  async setSpinAddonPriceUsd(
+    price: number,
+    actorUserId: string,
+    manager?: EntityManager,
+  ): Promise<number> {
+    if (!Number.isFinite(price) || price < SPIN_PRICE_MIN || price > SPIN_PRICE_MAX) {
+      throw BadRequestError(
+        `The spin price must be between ${SPIN_PRICE_MIN} and ${SPIN_PRICE_MAX} USD.`,
+      );
+    }
+    await this.appSettingRepository.upsert(
+      "spin_addon_price_usd",
+      price.toFixed(2),
+      actorUserId,
+      manager,
+    );
+    SettingsService.invalidateCache();
+    logger.info({ price, actorUserId }, "Spin add-on price updated");
+    return price;
+  }
+
   /**
    * Atomic multi-setting update, audited in the same transaction.
    *
@@ -211,7 +252,7 @@ export class SettingsService {
    * leave an already-saved trial length behind while the response reports a failure.
    */
   async updateSettings(
-    input: { trialDurationDays?: number; platformCurrency?: string },
+    input: { trialDurationDays?: number; platformCurrency?: string; spinAddonPriceUsd?: number },
     actor: { id: string; email: string },
   ): Promise<PlatformSettings> {
     const result = await AppDataSource.transaction(async (manager) => {
@@ -221,6 +262,9 @@ export class SettingsService {
       }
       if (input.platformCurrency !== undefined) {
         await this.setPlatformCurrency(input.platformCurrency, actor.id, manager);
+      }
+      if (input.spinAddonPriceUsd !== undefined) {
+        await this.setSpinAddonPriceUsd(input.spinAddonPriceUsd, actor.id, manager);
       }
       const after = await this.getSettings(manager);
 

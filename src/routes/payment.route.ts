@@ -8,6 +8,7 @@ import {
   changePlanSchema,
   confirmSubscriptionSchema,
   createOrderSchema,
+  createSpinOrderSchema,
   subscribeSchema,
 } from "@/validation/schemas/payment.schema";
 
@@ -16,6 +17,9 @@ const controller = new PaymentController();
 
 // public — anyone can see available plans
 router.get("/plans", controller.getPlans);
+// public — the price of one lucky draw spin add-on. Separate from /plans on purpose, so
+// that response keeps its array shape for any frontend still live during a deploy.
+router.get("/spin-addon", controller.getSpinAddon);
 
 // company-authenticated — initiate + capture.
 // Uses companyMiddleware, which allows every non-deactivated state through. That is
@@ -27,6 +31,12 @@ router.post(
   companyMiddleware,
   validateRequest(createOrderSchema, ValidationTarget.BODY),
   controller.createOrder,
+);
+router.post(
+  "/paypal/create-spin-order",
+  companyMiddleware,
+  validateRequest(createSpinOrderSchema, ValidationTarget.BODY),
+  controller.createSpinOrder,
 );
 router.post(
   "/paypal/capture-order",

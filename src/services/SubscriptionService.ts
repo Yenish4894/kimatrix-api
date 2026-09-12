@@ -279,8 +279,8 @@ export class SubscriptionService {
         await manager.query(
           `INSERT INTO "payments"
              ("company_id", "plan_id", "subscription_id", "paypal_sale_id",
-              "kind", "status", "amount", "currency", "captured_at")
-           VALUES ($1, $2, $3, $4, 'subscription_cycle', 'captured', $5, $6, now())
+              "kind", "status", "amount", "currency", "captured_at", "draw_spins")
+           VALUES ($1, $2, $3, $4, 'subscription_cycle', 'captured', $5, $6, now(), 0)
            ON CONFLICT ("paypal_sale_id") WHERE "paypal_sale_id" IS NOT NULL DO NOTHING
            RETURNING "id"`,
           [sub.company_id, sub.plan_id, sub.id, params.saleId, params.amount, params.currency],
@@ -292,16 +292,21 @@ export class SubscriptionService {
         return false;
       }
 
-      // Same atomic stacking as the Orders path, so a renewal landing early adds to the
-      // remaining time instead of overwriting it.
-      const { subscriptionEndsAt } = await this.companyRepository.extendSubscription(
-        {
-          companyId: sub.company_id,
-          planId: sub.plan_id,
-          durationDays: sub.duration_days,
-          now: new Date(),
-        },
-        manager,
+      // Extend only after the unique sale insert succeeds. A PayPal webhook replay
+      // must not add a second period before it discovers that the sale was known.
+      const { subscriptionStartsAt, subscriptionEndsAt } =
+        await this.companyRepository.extendSubscription(
+          {
+            companyId: sub.company_id,
+            planId: sub.plan_id,
+            durationDays: sub.duration_days,
+            now: new Date(),
+          },
+          manager,
+        );
+      await manager.query(
+        `UPDATE "payments" SET "subscription_starts_at" = $2, "subscription_ends_at" = $3 WHERE "id" = $1`,
+        [inserted[0]!.id, subscriptionStartsAt, subscriptionEndsAt],
       );
 
       await manager.getRepository(Subscription).update(sub.id, {
@@ -309,7 +314,7 @@ export class SubscriptionService {
         currentPeriodEnd: subscriptionEndsAt,
         // A successful charge clears a past-due state and re-arms the expiry notice,
         // since the deadline has moved.
-        currentPeriodStart: new Date(),
+        currentPeriodStart: subscriptionStartsAt,
       });
       await manager
         .getRepository(Company)

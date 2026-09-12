@@ -70,18 +70,22 @@ export class LuckyDrawRepository {
   async activePeriods(companyId: string, now: Date, manager: EntityManager): Promise<DrawPeriod[]> {
     const rows = (await manager.query(
       `WITH periods AS (
-         SELECT 'payment:' || p."id"          AS period_key,
+         SELECT 'paid:' || floor(extract(epoch FROM p."subscription_starts_at") * 1000)::bigint
+                         || ':' || floor(extract(epoch FROM p."subscription_ends_at") * 1000)::bigint AS period_key,
                 'payment'::text               AS source,
-                p."id"                        AS payment_id,
+                -- The earliest payment in the window stands for the group. Not min(id):
+                -- PostgreSQL has no min() aggregate for uuid in every supported version.
+                (array_agg(p."id" ORDER BY p."captured_at", p."id"))[1] AS payment_id,
                 p."subscription_starts_at"    AS period_start,
                 p."subscription_ends_at"      AS period_end,
-                p."draw_spins"                AS spins
+                sum(p."draw_spins")::int      AS spins
            FROM "payments" p
           WHERE p."company_id" = $1
             AND p."status" = 'captured'
             AND p."draw_spins" > 0
             AND p."subscription_starts_at" <= $2
             AND p."subscription_ends_at" > $2
+          GROUP BY p."subscription_starts_at", p."subscription_ends_at"
          UNION ALL
          SELECT 'comp:' || floor(extract(epoch FROM c."comp_draw_spins_granted_at") * 1000)::bigint,
                 'comp'::text,

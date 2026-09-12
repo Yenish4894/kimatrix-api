@@ -1,6 +1,6 @@
 # 🎯 KIMates Backend API
 
-> B2B SaaS QR-based customer purchase tracking platform for fuel stations and shops in Niger, West Africa.
+> B2B SaaS QR-based customer purchase tracking platform for fuel stations and shops, focused on South Africa and India.
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-blue)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-22-green)](https://nodejs.org/)
@@ -30,7 +30,7 @@
 
 ## 🌟 Overview
 
-**KIMates** is a comprehensive B2B SaaS platform that enables businesses (fuel stations and shops) in Niger to track customer purchases through QR codes. Customers scan a QR code, submit purchase details without requiring authentication, and businesses gain insights through a powerful dashboard.
+**KIMates** is a comprehensive B2B SaaS platform that enables fuel stations and shops, focused on South Africa and India, to track customer purchases through QR codes. Customers scan a QR code, submit purchase details without requiring authentication, and businesses gain insights through a powerful dashboard. Customer amounts use the company country’s local currency; subscription payments are in USD.
 
 ### Key Value Propositions
 
@@ -529,10 +529,10 @@ For issues and questions:
 
 ## 🙏 Acknowledgments
 
-- Built for fuel stations and shops in Niger, West Africa
+- Built for fuel stations and shops, focused on South Africa and India
 - Designed for low-bandwidth, mobile-first environments
 - Inspired by the need for simple, effective customer tracking
 
 ---
 
-**Made with ❤️ for small businesses in West Africa**
+**Made with ❤️ for small businesses**

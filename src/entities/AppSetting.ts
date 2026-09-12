@@ -8,7 +8,11 @@ import { User } from "./User";
  * step by hand. The CHECK is what stops a typo creating a dead setting that silently
  * reads back as "unset" forever.
  */
-export const APP_SETTING_KEYS = ["trial_duration_days", "platform_currency"] as const;
+export const APP_SETTING_KEYS = [
+  "trial_duration_days",
+  "platform_currency",
+  "spin_addon_price_usd",
+] as const;
 export type AppSettingKey = (typeof APP_SETTING_KEYS)[number];
 
 /**

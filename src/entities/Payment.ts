@@ -24,7 +24,7 @@ export const PAYMENT_STATUSES = [
 ] as const;
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 
-export const PAYMENT_KINDS = ["order", "subscription_cycle"] as const;
+export const PAYMENT_KINDS = ["order", "subscription_cycle", "spin_addon"] as const;
 export type PaymentKind = (typeof PAYMENT_KINDS)[number];
 
 @Entity("payments")

@@ -1,6 +1,6 @@
 import type { EntityManager, Repository } from "typeorm";
 import { AppDataSource } from "data-source";
-import type { PaymentStatus } from "@/entities/Payment";
+import type { PaymentKind, PaymentStatus } from "@/entities/Payment";
 import { Payment } from "@/entities/Payment";
 
 export class PaymentRepository {
@@ -17,6 +17,9 @@ export class PaymentRepository {
       amount: number;
       currency: string;
       drawSpins?: number;
+      kind?: PaymentKind;
+      subscriptionStartsAt?: Date | null;
+      subscriptionEndsAt?: Date | null;
     },
     manager?: EntityManager,
   ): Promise<Payment> {
@@ -27,12 +30,13 @@ export class PaymentRepository {
         plan: { id: data.planId } as never,
         paypalOrderId: data.paypalOrderId,
         status: data.status,
+        kind: data.kind ?? "order",
         amount: String(data.amount),
         currency: data.currency,
         drawSpins: data.drawSpins ?? 0,
         capturedAt: null,
-        subscriptionStartsAt: null,
-        subscriptionEndsAt: null,
+        subscriptionStartsAt: data.subscriptionStartsAt ?? null,
+        subscriptionEndsAt: data.subscriptionEndsAt ?? null,
         paypalResponse: null,
       }),
     );

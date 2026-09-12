@@ -5,6 +5,8 @@ import type {
   CancelSubscriptionInput,
   ChangePlanInput,
   ConfirmSubscriptionInput,
+  CreateOrderInput,
+  CreateSpinOrderInput,
   SubscribeInput,
 } from "@/validation/schemas/payment.schema";
 import { PaymentService } from "@/services/PaymentService";
@@ -23,15 +25,35 @@ export class PaymentController extends BaseController {
     });
   };
 
+  getSpinAddon = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const data = await paymentService.getSpinAddonPrice();
+      return { data, message: "Spin add-on price retrieved." };
+    });
+  };
+
   createOrder = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       const companyId = req.company!.id;
-      const { planId } = req.body as { planId: string };
+      const { planId, spinQuantity } = req.body as CreateOrderInput;
       if (!planId) throw BadRequestError("planId is required.");
-      const result = await paymentService.initiatePayment(companyId, planId);
+      const result = await paymentService.initiatePayment(companyId, planId, spinQuantity);
       return {
         data: result,
         message: "Order created. Redirect to approvalUrl to complete payment.",
+        statusCode: 201,
+      };
+    });
+  };
+
+  createSpinOrder = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const companyId = req.company!.id;
+      const { spinQuantity } = req.body as CreateSpinOrderInput;
+      const result = await paymentService.initiateSpinPurchase(companyId, spinQuantity);
+      return {
+        data: result,
+        message: "Spin order created. Redirect to approvalUrl to complete payment.",
         statusCode: 201,
       };
     });

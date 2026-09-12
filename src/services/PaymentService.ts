@@ -6,8 +6,11 @@ import { PaymentRepository } from "@/repositories/PaymentRepository";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { PaypalService } from "@/services/PaypalService";
 import { PaypalWebhookService } from "@/services/PaypalWebhookService";
+import { SettingsService } from "@/services/SettingsService";
 import { BadRequestError, ConflictError, NotFoundError } from "@/errors/index";
 import type { Plan } from "@/entities/Plan";
+import { computeEntitlement } from "@/utils/entitlement";
+import { orderAmount, spinWindowClosed } from "@/utils/spinAddon";
 
 export interface PlanDto {
   /** Lucky draw spins the plan includes, so the billing page can say so. */
@@ -40,6 +43,7 @@ export interface InitiatePaymentResult {
 
 export interface CapturePaymentResult {
   paymentId: string;
+  kind: "order" | "spin_addon";
   subscriptionStartsAt: Date;
   subscriptionEndsAt: Date;
 }
@@ -50,23 +54,50 @@ export class PaymentService {
   private companyRepository = new CompanyRepository();
   private paypalService = new PaypalService();
   private paypalWebhookService = new PaypalWebhookService();
+  private settingsService = new SettingsService();
 
   async getPlans(): Promise<PlanDto[]> {
     const plans = await this.planRepository.findAllActive();
     return plans.map(this.toDto);
   }
 
-  async initiatePayment(companyId: string, planId: string): Promise<InitiatePaymentResult> {
+  /**
+   * Price of one lucky draw spin add-on, in USD.
+   *
+   * Its own endpoint rather than a field on `/plans`: changing `/plans` from an array to
+   * an object broke whichever frontend was live while the other half deployed — the
+   * homepage pricing and the billing page both call `.find` on that response.
+   */
+  async getSpinAddonPrice(): Promise<{ priceUsd: number }> {
+    return { priceUsd: await this.settingsService.getSpinAddonPriceUsd() };
+  }
+
+  async initiatePayment(
+    companyId: string,
+    planId: string,
+    spinQuantity = 0,
+  ): Promise<InitiatePaymentResult> {
     const plan = await this.planRepository.findById(planId);
-    if (!plan) throw NotFoundError("Plan not found.");
+    if (!plan || !plan.isActive || plan.archivedAt != null) {
+      throw NotFoundError("That plan is no longer available.");
+    }
+    if (!Number.isInteger(spinQuantity) || spinQuantity < 0 || spinQuantity > 100) {
+      throw BadRequestError("Choose between 0 and 100 spins.");
+    }
+    if (spinQuantity > 0 && plan.currency !== "USD") {
+      throw BadRequestError("Lucky Draw spins are priced in USD and require a USD plan.");
+    }
+
+    const spinAddonPriceUsd = await this.settingsService.getSpinAddonPriceUsd();
+    const amount = orderAmount(Number(plan.price), spinQuantity, spinAddonPriceUsd);
 
     const returnUrl = `${config.FRONTEND_BASE_URL}/company/billing/success`;
     const cancelUrl = `${config.FRONTEND_BASE_URL}/company/billing/cancel`;
 
     const order = await this.paypalService.createOrder({
-      amount: Number(plan.price),
+      amount,
       currency: plan.currency,
-      referenceId: `${companyId}:${planId}`,
+      referenceId: `${companyId}:${planId}:spins:${spinQuantity}`,
       returnUrl,
       cancelUrl,
     });
@@ -80,9 +111,10 @@ export class PaymentService {
       planId,
       paypalOrderId: order.id,
       status: "pending",
-      amount: Number(plan.price),
+      amount,
       currency: plan.currency,
-      drawSpins: plan.drawSpins ?? 0,
+      // Plans no longer include spins. This is the paid checkout add-on snapshot.
+      drawSpins: spinQuantity,
     });
 
     logger.info({ companyId, planId, paypalOrderId: order.id }, "PayPal order created");
@@ -92,6 +124,77 @@ export class PaymentService {
       paypalOrderId: order.id,
       approvalUrl: approvalLink.href,
     };
+  }
+
+  /** Buy more spins without extending access. Only a company in a paid plan period can do this. */
+  async initiateSpinPurchase(
+    companyId: string,
+    spinQuantity: number,
+  ): Promise<InitiatePaymentResult> {
+    if (!Number.isInteger(spinQuantity) || spinQuantity < 1 || spinQuantity > 100) {
+      throw BadRequestError("Choose between 1 and 100 spins.");
+    }
+
+    // The add-on joins the paid window running right now, taking that payment's exact
+    // start and end. LuckyDrawRepository pools captured payments by window, so matching
+    // it is what puts these spins in the same draw as the plan's.
+    //
+    // It used to take the start from the current payment but the end from
+    // `companies.subscription_expires_at`. With a second plan stacked after this one that
+    // is the end of the FUTURE plan: the window matched nothing, formed its own pool, and
+    // spanned both plans.
+    const [current] = (await AppDataSource.query(
+      `SELECT p."plan_id" AS plan_id,
+              p."subscription_starts_at" AS starts_at,
+              p."subscription_ends_at" AS ends_at
+         FROM "payments" p
+        WHERE p."company_id" = $1
+          AND p."status" = 'captured'
+          AND p."kind" IN ('order', 'subscription_cycle')
+          AND p."subscription_starts_at" <= now()
+          AND p."subscription_ends_at" > now()
+        ORDER BY p."subscription_starts_at" DESC
+        LIMIT 1`,
+      [companyId],
+    )) as { plan_id: string; starts_at: Date; ends_at: Date }[];
+    const company = await this.companyRepository.findById(companyId);
+    if (!company || !current || !computeEntitlement(company, new Date()).hasAccess) {
+      throw BadRequestError("You can add spins only while a paid plan is active.");
+    }
+    const plan = await this.planRepository.findById(current.plan_id);
+    if (!plan) throw NotFoundError("Current plan not found.");
+    if (plan.currency !== "USD") {
+      throw BadRequestError("Lucky Draw spins are priced in USD and require a USD plan.");
+    }
+
+    const spinAddonPriceUsd = await this.settingsService.getSpinAddonPriceUsd();
+    const amount = orderAmount(0, spinQuantity, spinAddonPriceUsd);
+    const returnUrl = `${config.FRONTEND_BASE_URL}/company/billing/success`;
+    const cancelUrl = `${config.FRONTEND_BASE_URL}/company/billing/cancel`;
+    const order = await this.paypalService.createOrder({
+      amount,
+      currency: "USD",
+      referenceId: `${companyId}:spin-addon:${spinQuantity}`,
+      returnUrl,
+      cancelUrl,
+    });
+    const approvalLink = order.links.find((l) => l.rel === "approve");
+    if (!approvalLink)
+      throw BadRequestError("Spin purchase could not be initiated. Please try again.");
+
+    const payment = await this.paymentRepository.create({
+      companyId,
+      planId: plan.id,
+      paypalOrderId: order.id,
+      status: "pending",
+      kind: "spin_addon",
+      amount,
+      currency: "USD",
+      drawSpins: spinQuantity,
+      subscriptionStartsAt: new Date(current.starts_at),
+      subscriptionEndsAt: new Date(current.ends_at),
+    });
+    return { paymentId: payment.id, paypalOrderId: order.id, approvalUrl: approvalLink.href };
   }
 
   async capturePayment(companyId: string, paypalOrderId: string): Promise<CapturePaymentResult> {
@@ -108,6 +211,7 @@ export class PaymentService {
     if (existing?.status === "captured" && existing.company.id === companyId) {
       return {
         paymentId: existing.id,
+        kind: existing.kind === "spin_addon" ? "spin_addon" : "order",
         subscriptionStartsAt: existing.subscriptionStartsAt!,
         subscriptionEndsAt: existing.subscriptionEndsAt!,
       };
@@ -124,6 +228,7 @@ export class PaymentService {
       if (current.status === "captured") {
         return {
           paymentId: current.id,
+          kind: current.kind === "spin_addon" ? "spin_addon" : "order",
           subscriptionStartsAt: current.subscriptionStartsAt!,
           subscriptionEndsAt: current.subscriptionEndsAt!,
         };
@@ -132,6 +237,19 @@ export class PaymentService {
         throw ConflictError("This payment is already being processed. Please wait a moment.");
       }
       throw BadRequestError("This payment cannot be captured.");
+    }
+
+    // A spin add-on belongs to one plan window. If the buyer sat on PayPal's approval
+    // page until that window closed, capturing would charge them for spins that can no
+    // longer be used — so stop here, before any money moves. An order never approved
+    // is simply abandoned at PayPal.
+    if (claimed.kind === "spin_addon" && spinWindowClosed(claimed.subscriptionEndsAt, new Date())) {
+      await this.paymentRepository.updateStatus(claimed.id, "failed", {
+        reason: "plan_window_ended_before_capture",
+      });
+      throw BadRequestError(
+        "Your plan period ended before this payment went through, so you have not been charged. Renew your plan to buy spins.",
+      );
     }
 
     // ── 2. Network I/O, holding NO database connection. ───────────────────────
@@ -192,22 +310,29 @@ export class PaymentService {
       if (payment.status === "captured") {
         return {
           paymentId: payment.id,
+          kind: payment.kind === "spin_addon" ? "spin_addon" : "order",
           subscriptionStartsAt: payment.subscriptionStartsAt!,
           subscriptionEndsAt: payment.subscriptionEndsAt!,
         };
       }
 
       const now = new Date();
-      const { subscriptionStartsAt, subscriptionEndsAt } =
-        await this.companyRepository.extendSubscription(
-          {
-            companyId: payment.company.id,
-            planId: payment.plan.id,
-            durationDays: payment.plan.durationDays,
-            now,
-          },
-          manager,
-        );
+      const dates =
+        payment.kind === "spin_addon"
+          ? {
+              subscriptionStartsAt: payment.subscriptionStartsAt!,
+              subscriptionEndsAt: payment.subscriptionEndsAt!,
+            }
+          : await this.companyRepository.extendSubscription(
+              {
+                companyId: payment.company.id,
+                planId: payment.plan.id,
+                durationDays: payment.plan.durationDays,
+                now,
+              },
+              manager,
+            );
+      const { subscriptionStartsAt, subscriptionEndsAt } = dates;
 
       await this.paymentRepository.updateCaptured(
         payment.id,
@@ -221,7 +346,12 @@ export class PaymentService {
         manager,
       );
 
-      return { paymentId: payment.id, subscriptionStartsAt, subscriptionEndsAt };
+      return {
+        paymentId: payment.id,
+        kind: payment.kind === "spin_addon" ? "spin_addon" : "order",
+        subscriptionStartsAt,
+        subscriptionEndsAt,
+      };
     });
   }
 
@@ -294,18 +424,6 @@ export class PaymentService {
     );
   }
 
-  private computeSubscriptionDates(
-    plan: Plan,
-    currentExpiresAt: Date | null,
-    now: Date,
-  ): { subscriptionStartsAt: Date; subscriptionEndsAt: Date } {
-    // If the company still has time left, stack the new plan on top of the current expiry
-    const base = currentExpiresAt && currentExpiresAt > now ? currentExpiresAt : now;
-    const subscriptionStartsAt = base;
-    const subscriptionEndsAt = new Date(base.getTime() + plan.durationDays * 24 * 60 * 60 * 1000);
-    return { subscriptionStartsAt, subscriptionEndsAt };
-  }
-
   private toDto(plan: Plan): PlanDto {
     return {
       id: plan.id,
@@ -317,7 +435,7 @@ export class PaymentService {
       isPopular: plan.isPopular,
       sortOrder: plan.sortOrder,
       isRecurring: plan.isRecurring === true && plan.paypalPlanId != null,
-      drawSpins: plan.drawSpins ?? 0,
+      drawSpins: 0,
     };
   }
 }

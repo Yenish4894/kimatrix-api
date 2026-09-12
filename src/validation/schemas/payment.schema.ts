@@ -13,7 +13,24 @@ export const createOrderSchema = Joi.object({
     "any.required": "Choose a plan to continue.",
     "string.guid": "That plan is no longer available.",
   }),
+  spinQuantity: Joi.number().integer().min(0).max(100).default(0),
 }).required();
+
+export const createSpinOrderSchema = Joi.object({
+  spinQuantity: Joi.number().integer().min(1).max(100).required().messages({
+    "any.required": "Choose how many spins to add.",
+    "number.min": "Choose at least one spin.",
+  }),
+}).required();
+
+export interface CreateOrderInput {
+  planId: string;
+  spinQuantity: number;
+}
+
+export interface CreateSpinOrderInput {
+  spinQuantity: number;
+}
 
 export const captureOrderSchema = Joi.object({
   // PayPal order IDs are short uppercase alphanumeric. Bounded to the column width
