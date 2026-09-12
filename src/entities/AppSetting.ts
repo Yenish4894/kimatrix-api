@@ -12,6 +12,7 @@ export const APP_SETTING_KEYS = [
   "trial_duration_days",
   "platform_currency",
   "spin_addon_price_usd",
+  "trial_draw_spins",
 ] as const;
 export type AppSettingKey = (typeof APP_SETTING_KEYS)[number];
 

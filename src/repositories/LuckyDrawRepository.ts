@@ -4,7 +4,7 @@ import type { EntityManager } from "typeorm";
 export interface DrawPeriod {
   /** `payment:<id>` or `comp:<granted-at epoch ms>` — what a spin is counted against. */
   periodKey: string;
-  source: "payment" | "comp";
+  source: "payment" | "comp" | "trial";
   paymentId: string | null;
   periodStart: Date;
   /** Null for a comp with no end date. */
@@ -26,7 +26,7 @@ export interface DrawEntry {
 
 export interface DrawHistoryRow extends Omit<DrawEntry, "customerId"> {
   id: string;
-  source: "payment" | "comp";
+  source: "payment" | "comp" | "trial";
   periodStart: Date;
   periodEnd: Date | null;
   entriesCount: number;
@@ -66,8 +66,19 @@ export class LuckyDrawRepository {
     await manager.query(`SELECT "id" FROM "companies" WHERE "id" = $1 FOR UPDATE`, [companyId]);
   }
 
-  /** Windows that are open right now and include spins, soonest-ending first. */
-  async activePeriods(companyId: string, now: Date, manager: EntityManager): Promise<DrawPeriod[]> {
+  /**
+   * Windows that are open right now and include spins, soonest-ending first.
+   *
+   * @param trialSpins  Free spins for the company's running trial, or 0. The caller
+   *   decides — it knows whether the trial is what grants access right now (a company
+   *   that paid or was comped mid-trial isn't "on trial"), which this query can't see.
+   */
+  async activePeriods(
+    companyId: string,
+    now: Date,
+    manager: EntityManager,
+    trialSpins = 0,
+  ): Promise<DrawPeriod[]> {
     const rows = (await manager.query(
       `WITH periods AS (
          SELECT 'paid:' || floor(extract(epoch FROM p."subscription_starts_at") * 1000)::bigint
@@ -100,16 +111,33 @@ export class LuckyDrawRepository {
             AND c."comp_draw_spins" > 0
             AND c."comp_draw_spins_granted_at" IS NOT NULL
             AND (c."comped_until" IS NULL OR c."comped_until" > $2)
+         UNION ALL
+         -- The running trial, with the admin's live spin setting passed in as $3.
+         -- Keyed on the trial's start so a later trial (after an admin reset) gets its
+         -- own count rather than inheriting spins used in an earlier one.
+         SELECT 'trial:' || floor(extract(epoch FROM c."trial_started_at") * 1000)::bigint,
+                'trial'::text,
+                NULL::uuid,
+                c."trial_started_at",
+                c."trial_ends_at",
+                $3::int
+           FROM "companies" c
+          WHERE c."id" = $1
+            AND $3::int > 0
+            AND c."deactivated_at" IS NULL
+            AND c."trial_started_at" IS NOT NULL
+            AND c."trial_started_at" <= $2
+            AND c."trial_ends_at" > $2
        )
        SELECT pr.*,
               (SELECT count(*)::int FROM "lucky_draws" d
                 WHERE d."company_id" = $1 AND d."period_key" = pr.period_key) AS used
          FROM periods pr
         ORDER BY pr.period_end ASC NULLS LAST`,
-      [companyId, now],
+      [companyId, now, trialSpins],
     )) as {
       period_key: string;
-      source: "payment" | "comp";
+      source: "payment" | "comp" | "trial";
       payment_id: string | null;
       period_start: Date;
       period_end: Date | null;
@@ -225,7 +253,7 @@ export class LuckyDrawRepository {
     )) as Record<string, unknown>[];
     return rows.map((r) => ({
       id: String(r["id"]),
-      source: r["source"] as "payment" | "comp",
+      source: r["source"] as "payment" | "comp" | "trial",
       periodStart: new Date(r["period_start"] as string),
       periodEnd: r["period_end"] ? new Date(r["period_end"] as string) : null,
       entriesCount: Number(r["entries_count"]),

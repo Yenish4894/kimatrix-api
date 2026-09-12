@@ -19,3 +19,14 @@ export function orderAmount(basePrice: number, spinQuantity: number, spinPriceUs
 export function spinWindowClosed(windowEndsAt: Date | string | null, now: Date): boolean {
   return windowEndsAt !== null && new Date(windowEndsAt).getTime() <= now.getTime();
 }
+
+/**
+ * Free spins a company gets from its trial: the admin's setting while the trial is what
+ * grants access, otherwise none. A company that paid or was comped mid-trial is not
+ * "on trial" (computeEntitlement puts comp and paid first), so it doesn't collect trial
+ * spins on top of what it has.
+ */
+export function trialSpinsFor(isTrial: boolean, configuredTrialSpins: number): number {
+  if (!isTrial || !Number.isFinite(configuredTrialSpins)) return 0;
+  return Math.max(0, Math.floor(configuredTrialSpins));
+}

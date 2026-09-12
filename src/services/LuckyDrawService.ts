@@ -8,9 +8,13 @@ import {
   type DrawPeriod,
 } from "@/repositories/LuckyDrawRepository";
 import { logger } from "@/utils/logger";
+import { CompanyRepository } from "@/repositories/CompanyRepository";
+import { SettingsService } from "@/services/SettingsService";
+import { computeEntitlement } from "@/utils/entitlement";
+import { trialSpinsFor } from "@/utils/spinAddon";
 
 export interface DrawPeriodStatus {
-  source: "payment" | "comp";
+  source: "payment" | "comp" | "trial";
   periodStart: Date;
   periodEnd: Date | null;
   spins: number;
@@ -47,10 +51,31 @@ export interface SpinResult {
  */
 export class LuckyDrawService {
   private repository = new LuckyDrawRepository();
+  private companyRepository = new CompanyRepository();
+  private settingsService = new SettingsService();
+
+  /**
+   * Free spins from the company's trial: the admin's current setting while the trial is
+   * what grants access, otherwise 0. Read on every call, so changing the setting reaches
+   * trials already running.
+   */
+  private async trialSpins(companyId: string): Promise<number> {
+    const company = await this.companyRepository.findById(companyId);
+    if (!company) return 0;
+    return trialSpinsFor(
+      computeEntitlement(company, new Date()).isTrial,
+      await this.settingsService.getTrialDrawSpins(),
+    );
+  }
 
   async getStatus(companyId: string): Promise<DrawStatus> {
     return AppDataSource.transaction(async (manager) => {
-      const periods = await this.repository.activePeriods(companyId, new Date(), manager);
+      const periods = await this.repository.activePeriods(
+        companyId,
+        new Date(),
+        manager,
+        await this.trialSpins(companyId),
+      );
       const withPools = await Promise.all(
         periods.map(async (p): Promise<DrawPeriodStatus> => {
           const pool = await this.repository.countEligible(companyId, p, manager);
@@ -80,7 +105,12 @@ export class LuckyDrawService {
       // queues behind the first spin and then sees the spin already spent.
       await this.repository.lockCompany(companyId, manager);
 
-      const periods = await this.repository.activePeriods(companyId, new Date(), manager);
+      const periods = await this.repository.activePeriods(
+        companyId,
+        new Date(),
+        manager,
+        await this.trialSpins(companyId),
+      );
       // Soonest-ending window first: spins that are about to expire get used before
       // ones that will still be there next week.
       const period: DrawPeriod | undefined = periods.find((p) => p.spins - p.used > 0);

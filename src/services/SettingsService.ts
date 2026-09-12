@@ -10,6 +10,9 @@ export interface PlatformSettings {
   trialDurationDays: number;
   platformCurrency: string;
   spinAddonPriceUsd: number;
+  /** Free lucky draw spins every running trial gets. Read live, so a change applies to
+   *  trials already under way. */
+  trialDrawSpins: number;
 }
 
 /** Guard rails on the trial length. Wide enough to be useful, narrow enough that a
@@ -19,6 +22,9 @@ export const TRIAL_DURATION_MAX = 90;
 
 export const SPIN_PRICE_MIN = 0.01;
 export const SPIN_PRICE_MAX = 100;
+
+export const TRIAL_SPINS_MIN = 0;
+export const TRIAL_SPINS_MAX = 100;
 
 /**
  * Currencies PayPal will actually settle in. A bare /^[A-Z]{3}$/ check let an admin
@@ -97,6 +103,7 @@ export class SettingsService {
       trialDurationDays: config.TRIAL_DURATION_DAYS,
       platformCurrency: "USD",
       spinAddonPriceUsd: 3,
+      trialDrawSpins: 0,
     };
 
     try {
@@ -126,6 +133,13 @@ export class SettingsService {
               "Invalid spin_addon_price_usd setting; using default",
             );
           }
+        } else if (row.key === "trial_draw_spins") {
+          const parsed = Number.parseInt(row.value, 10);
+          if (Number.isInteger(parsed) && parsed >= TRIAL_SPINS_MIN && parsed <= TRIAL_SPINS_MAX) {
+            settings.trialDrawSpins = parsed;
+          } else {
+            logger.warn({ value: row.value }, "Invalid trial_draw_spins setting; using default");
+          }
         }
       }
     } catch (err) {
@@ -153,6 +167,10 @@ export class SettingsService {
 
   async getSpinAddonPriceUsd(manager?: EntityManager): Promise<number> {
     return (await this.getSettings(manager)).spinAddonPriceUsd;
+  }
+
+  async getTrialDrawSpins(manager?: EntityManager): Promise<number> {
+    return (await this.getSettings(manager)).trialDrawSpins;
   }
 
   async setTrialDurationDays(
@@ -245,6 +263,23 @@ export class SettingsService {
     return price;
   }
 
+  /** Free spins per trial. Applies to every trial running now, not just new ones. */
+  async setTrialDrawSpins(
+    spins: number,
+    actorUserId: string,
+    manager?: EntityManager,
+  ): Promise<number> {
+    if (!Number.isInteger(spins) || spins < TRIAL_SPINS_MIN || spins > TRIAL_SPINS_MAX) {
+      throw BadRequestError(
+        `Trial spins must be a whole number between ${TRIAL_SPINS_MIN} and ${TRIAL_SPINS_MAX}.`,
+      );
+    }
+    await this.appSettingRepository.upsert("trial_draw_spins", String(spins), actorUserId, manager);
+    SettingsService.invalidateCache();
+    logger.info({ spins, actorUserId }, "Trial draw spins updated");
+    return spins;
+  }
+
   /**
    * Atomic multi-setting update, audited in the same transaction.
    *
@@ -252,7 +287,12 @@ export class SettingsService {
    * leave an already-saved trial length behind while the response reports a failure.
    */
   async updateSettings(
-    input: { trialDurationDays?: number; platformCurrency?: string; spinAddonPriceUsd?: number },
+    input: {
+      trialDurationDays?: number;
+      platformCurrency?: string;
+      spinAddonPriceUsd?: number;
+      trialDrawSpins?: number;
+    },
     actor: { id: string; email: string },
   ): Promise<PlatformSettings> {
     const result = await AppDataSource.transaction(async (manager) => {
@@ -265,6 +305,9 @@ export class SettingsService {
       }
       if (input.spinAddonPriceUsd !== undefined) {
         await this.setSpinAddonPriceUsd(input.spinAddonPriceUsd, actor.id, manager);
+      }
+      if (input.trialDrawSpins !== undefined) {
+        await this.setTrialDrawSpins(input.trialDrawSpins, actor.id, manager);
       }
       const after = await this.getSettings(manager);
 

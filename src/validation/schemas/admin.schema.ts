@@ -138,6 +138,12 @@ export const updateSettingsSchema = Joi.object({
     "number.positive": "The spin price must be greater than zero.",
     "number.max": "The spin price cannot exceed USD 100.",
   }),
+  trialDrawSpins: Joi.number().integer().min(0).max(100).optional().messages({
+    "number.base": "Enter how many spins a trial gets.",
+    "number.integer": "Trial spins must be a whole number.",
+    "number.min": "Trial spins cannot be negative.",
+    "number.max": "A trial can get at most 100 spins.",
+  }),
 })
   .min(1)
   .required()
@@ -147,6 +153,7 @@ export interface UpdateSettingsBody {
   trialDurationDays?: number;
   platformCurrency?: string;
   spinAddonPriceUsd?: number;
+  trialDrawSpins?: number;
 }
 
 // ─── Subscription / trial administration ────────────────────────────────────
