@@ -45,11 +45,14 @@ export interface SubmitPurchaseContext {
   userAgent: string | undefined;
 }
 
+/**
+ * Deliberately carries no customer totals: the caller is anonymous, and echoing a
+ * customer's lifetime spend and visit count let anyone who knew a mobile number read
+ * them.
+ */
 export interface SubmitPurchaseResult {
   purchaseId: string;
   customerId: string;
-  customerTotalInvoiceAmount: string;
-  customerSubmissionCount: number;
   submittedAt: Date;
 }
 
@@ -132,10 +135,11 @@ export class QrService {
       let customer: Customer;
 
       if (existingCustomer) {
+        // The stored name and vehicle are NOT overwritten. This endpoint is public and
+        // unauthenticated, so letting a submission rewrite them let anyone who knew a
+        // mobile number rename that customer in the merchant's records. What was typed
+        // this time is still kept on the purchase as its name/vehicle snapshot.
         customer = existingCustomer;
-        await manager
-          .getRepository(Customer)
-          .update({ id: customer.id }, { fullName, vehicleNumber });
       } else {
         customer = await this.customerRepository.create(
           {
@@ -183,12 +187,6 @@ export class QrService {
         .setParameters({ amount: invoiceAmountString })
         .execute();
 
-      const updated = await this.customerRepository.findByIdInCompany(
-        customer.id,
-        company.id,
-        manager,
-      );
-
       logger.info(
         {
           companyId: company.id,
@@ -202,8 +200,6 @@ export class QrService {
       return {
         purchaseId: purchase.id,
         customerId: customer.id,
-        customerTotalInvoiceAmount: updated?.totalInvoiceAmount ?? purchase.invoiceAmount,
-        customerSubmissionCount: updated?.submissionCount ?? 1,
         submittedAt: purchase.submittedAt,
       };
     });

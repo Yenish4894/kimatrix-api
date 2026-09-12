@@ -43,7 +43,7 @@ UPDATE "companies" c
   FROM (
     SELECT "id",
            CASE
-             WHEN "is_active" = false AND "deactivated_at" IS NOT NULL THEN 'deactivated'
+             WHEN "deactivated_at" IS NOT NULL THEN 'deactivated'
              WHEN "is_comped" = true
                   AND ("comped_until" IS NULL OR "comped_until" > now()) THEN 'active'
              WHEN "subscription_expires_at" > now() THEN 'active'
@@ -53,7 +53,7 @@ UPDATE "companies" c
              ELSE 'pending'
            END AS status,
            CASE
-             WHEN "is_active" = false AND "deactivated_at" IS NOT NULL THEN false
+             WHEN "deactivated_at" IS NOT NULL THEN false
              WHEN "is_comped" = true
                   AND ("comped_until" IS NULL OR "comped_until" > now()) THEN true
              WHEN "subscription_expires_at" > now() THEN true

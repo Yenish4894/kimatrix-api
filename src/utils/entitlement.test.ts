@@ -37,6 +37,34 @@ describe("computeEntitlement", () => {
     assert.equal(e.canExport, false, "deactivated is the only state that blocks export");
   });
 
+  it("1b. deactivated even when isActive is true — deactivatedAt alone is the ban", () => {
+    // A trial start or a payment used to set isActive back to true on a banned row, and
+    // the old `!isActive && deactivatedAt` test then read that row as un-banned.
+    const e = computeEntitlement(
+      base({ isActive: true, deactivatedAt: PAST, subscriptionExpiresAt: FUTURE }),
+      NOW,
+    );
+    assert.equal(e.status, "deactivated");
+    assert.equal(e.hasAccess, false);
+    assert.equal(e.canExport, false);
+  });
+
+  it("1c. deactivated outranks a live trial and a comp with isActive true", () => {
+    const e = computeEntitlement(
+      base({
+        isActive: true,
+        deactivatedAt: PAST,
+        trialStartedAt: PAST,
+        trialEndsAt: FUTURE,
+        isComped: true,
+        compedUntil: null,
+      }),
+      NOW,
+    );
+    assert.equal(e.status, "deactivated");
+    assert.equal(e.hasAccess, false);
+  });
+
   it("2. comped with no end date — perpetual access", () => {
     const e = computeEntitlement(base({ isActive: true, isComped: true, compedUntil: null }), NOW);
     assert.equal(e.status, "active");

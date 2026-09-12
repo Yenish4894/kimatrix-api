@@ -13,7 +13,12 @@ import { Subscription } from "./Subscription";
  * deliberately NOT marked `failed`, because the webhook is the reconciliation path and
  * would skip a failed row.
  *
- * No DB CHECK constraint on this column, so adding a value needs no migration.
+ * `refunded` means PayPal took the money back (refund, chargeback reversal or denial)
+ * after we had recorded it. Draw spins and access only ever count `captured`, so the
+ * status change alone withdraws a spin add-on.
+ *
+ * The DB enforces this list with `chk_payments_status` (migration 1785643200000), which
+ * already allows `refunded`. Adding any further value needs a migration.
  */
 export const PAYMENT_STATUSES = [
   "pending",
@@ -21,6 +26,7 @@ export const PAYMENT_STATUSES = [
   "captured",
   "failed",
   "cancelled",
+  "refunded",
 ] as const;
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 

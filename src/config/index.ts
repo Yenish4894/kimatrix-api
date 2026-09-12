@@ -7,16 +7,27 @@ const parseInt10 = (value: string | undefined, fallback: number): number => {
 
 const parseBool = (value: string | undefined): boolean => value === "true";
 
+const isProductionEnv = (process.env["NODE_ENV"] ?? "development") === "production";
+
+/**
+ * A local-development fallback that production never gets. With a real default the
+ * required-key checks below could never fire, so a production box missing
+ * FRONTEND_BASE_URL booted happily and emailed customers localhost links. Empty in
+ * production means the existing "missing" checks do their job.
+ */
+const devDefault = (value: string | undefined, fallback: string): string =>
+  value ?? (isProductionEnv ? "" : fallback);
+
 export const config = {
   NODE_ENV: process.env["NODE_ENV"] ?? "development",
   PORT: parseInt10(process.env["PORT"], 5000),
   LOG_LEVEL: process.env["LOG_LEVEL"] ?? "INFO",
 
-  DB_HOST: process.env["DB_HOST"] ?? "localhost",
+  DB_HOST: devDefault(process.env["DB_HOST"], "localhost"),
   DB_PORT: parseInt10(process.env["DB_PORT"], 5432),
-  DB_USERNAME: process.env["DB_USERNAME"] ?? "postgres",
+  DB_USERNAME: devDefault(process.env["DB_USERNAME"], "postgres"),
   DB_PASSWORD: process.env["DB_PASSWORD"] ?? "",
-  DB_NAME: process.env["DB_NAME"] ?? "sena_temp_dev",
+  DB_NAME: devDefault(process.env["DB_NAME"], "sena_temp_dev"),
   DB_SSL: parseBool(process.env["DB_SSL"]),
   // PEM for a provider using a private CA. Certificate validation is always ON when
   // DB_SSL is set; this is how you supply the root when it isn't publicly trusted.
@@ -67,7 +78,7 @@ export const config = {
   SMTP_FROM_NAME: process.env["SMTP_FROM_NAME"] ?? "KIMates",
 
   APP_BASE_URL: process.env["APP_BASE_URL"] ?? "http://localhost:5000",
-  FRONTEND_BASE_URL: process.env["FRONTEND_BASE_URL"] ?? "http://localhost:5173",
+  FRONTEND_BASE_URL: devDefault(process.env["FRONTEND_BASE_URL"], "http://localhost:5173"),
 
   /**
    * Arms the expiry purge. Off unless explicitly "true": this is the only irreversible
@@ -77,7 +88,9 @@ export const config = {
 
   PAYPAL_CLIENT_ID: process.env["PAYPAL_CLIENT_ID"] ?? "",
   PAYPAL_CLIENT_SECRET: process.env["PAYPAL_CLIENT_SECRET"] ?? "",
-  PAYPAL_MODE: (process.env["PAYPAL_MODE"] ?? "sandbox") as "sandbox" | "live",
+  // The cast is only a promise; `validateConfig` checks it in production, where a typo
+  // would otherwise fall through to whichever PayPal host the client picks by default.
+  PAYPAL_MODE: devDefault(process.env["PAYPAL_MODE"], "sandbox") as "sandbox" | "live",
   PAYPAL_WEBHOOK_ID: process.env["PAYPAL_WEBHOOK_ID"] ?? "",
 } as const;
 
@@ -133,6 +146,17 @@ export function validateConfig(): void {
 
     if (config.TRIAL_IDENTITY_PEPPER.length < 32) {
       throw new Error("[config] TRIAL_IDENTITY_PEPPER must be set to at least 32 characters");
+    }
+
+    // Every link we email is built from this. http:// would send verification and
+    // password-reset tokens in the clear.
+    if (!config.FRONTEND_BASE_URL.startsWith("https://")) {
+      throw new Error("[config] FRONTEND_BASE_URL must start with https:// in production");
+    }
+
+    const paypalMode: string = config.PAYPAL_MODE;
+    if (paypalMode !== "sandbox" && paypalMode !== "live") {
+      throw new Error('[config] PAYPAL_MODE must be "sandbox" or "live" in production');
     }
   }
 }

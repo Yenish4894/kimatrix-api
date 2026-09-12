@@ -187,9 +187,18 @@ export function errorHandler(err: Error, req: Request, res: Response, _next: Nex
   }
 
   if (err instanceof QueryFailedError) {
-    const pgError = err as QueryFailedError & { code?: string; detail?: string };
+    const pgError = err as QueryFailedError & {
+      code?: string;
+      detail?: string;
+      constraint?: string;
+    };
     if (pgError.code === "23505") {
-      reqLogger.warn({ pgCode: pgError.code, detail: pgError.detail }, "Unique violation (23505)");
+      // The constraint name, not `detail`: detail quotes the conflicting value, which
+      // is a customer's email or mobile. The constraint says which field just as well.
+      reqLogger.warn(
+        { pgCode: pgError.code, constraint: pgError.constraint },
+        "Unique violation (23505)",
+      );
       const friendly = mapUniqueViolationToFriendly(pgError.detail);
       res.status(409).json({
         success: false,

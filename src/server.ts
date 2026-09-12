@@ -57,6 +57,10 @@ function warnIfPaymentsMisconfigured(): void {
   }
 }
 
+let shuttingDown = false;
+/** Set once start() has wired the graceful shutdown; null during boot. */
+let shutdownHook: ((signal: string, exitCode: number) => Promise<void>) | null = null;
+
 async function start(): Promise<void> {
   validateConfig();
   warnIfPaymentsMisconfigured();
@@ -73,7 +77,11 @@ async function start(): Promise<void> {
     logger.info({ port: config.PORT, env: config.NODE_ENV }, "Server listening");
   });
 
-  const shutdown = async (signal: string): Promise<void> => {
+  const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
+    // SIGTERM followed by SIGINT, or a crash mid-shutdown, must not start a second
+    // run that closes the pool twice.
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info({ signal }, "Shutting down gracefully");
     const forceTimer = setTimeout(() => {
       logger.error("Graceful shutdown timed out — forcing exit");
@@ -101,12 +109,37 @@ async function start(): Promise<void> {
     await closeEmailQueue();
     await closeDatabase();
     await closeRedis();
-    process.exit(0);
+    process.exit(exitCode);
   };
 
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
+  shutdownHook = shutdown;
 }
+
+// Both registered before start() so a failure during boot is caught too.
+//
+// A rejection is logged and the process kept up. Node's default would kill the whole
+// server — every in-flight capture and scan — over one stray promise, which unlike a
+// synchronous throw has not left shared state half-mutated. It is logged at error so
+// it is seen, never swallowed.
+process.on("unhandledRejection", (reason) => {
+  logger.error({ err: reason }, "Unhandled promise rejection");
+});
+
+// After an uncaught exception the process state is unknown, so we never carry on.
+// Drain what we can through the normal shutdown (bounded by its 10s force timer), then
+// exit non-zero so pm2 restarts us. During boot there is nothing to drain yet.
+process.on("uncaughtException", (err) => {
+  logger.fatal({ err }, "Uncaught exception — shutting down");
+  if (!shutdownHook || shuttingDown) {
+    process.exit(1);
+  }
+  shutdownHook("uncaughtException", 1).catch((shutdownErr: unknown) => {
+    logger.error({ err: shutdownErr }, "Graceful shutdown after uncaught exception failed");
+    process.exit(1);
+  });
+});
 
 start().catch((err) => {
   logger.error({ err }, "Failed to start server");

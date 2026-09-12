@@ -3,6 +3,19 @@ import { AppDataSource } from "data-source";
 import type { PaymentKind, PaymentStatus } from "@/entities/Payment";
 import { Payment } from "@/entities/Payment";
 
+/** Raw row for reversal handling — snake_case because it comes straight from SQL. */
+export interface ReversalPaymentRow {
+  id: string;
+  company_id: string;
+  kind: PaymentKind;
+  status: PaymentStatus;
+  amount: string;
+  currency: string;
+  subscription_starts_at: Date | null;
+  subscription_ends_at: Date | null;
+  paypal_response: Record<string, unknown> | null;
+}
+
 export class PaymentRepository {
   private getRepo(manager?: EntityManager): Repository<Payment> {
     return manager ? manager.getRepository(Payment) : AppDataSource.getRepository(Payment);
@@ -144,6 +157,45 @@ export class PaymentRepository {
       status,
       ...(paypalResponse ? { paypalResponse: paypalResponse as never } : {}),
     });
+  }
+
+  /**
+   * Locks the payment a PayPal reversal event refers to, by order id or capture id.
+   *
+   * Raw SQL with `FOR UPDATE` on the single row — no joins, for the same reason as the
+   * other locking reads here. The capture id is not a column: it lives in
+   * `paypal_response`, which holds either the synchronous capture body
+   * (`purchase_units[0].payments.captures[0].id`) or, when the webhook finalized it, the
+   * whole PAYMENT.CAPTURE.COMPLETED event (`resource.id`). That match is an unindexed
+   * scan, acceptable because refunds are rare and `payments` is small; the order id,
+   * which is indexed, is tried first whenever PayPal supplies it.
+   */
+  async findForReversalForUpdate(
+    refs: { orderId: string | null; captureId: string | null },
+    manager: EntityManager,
+  ): Promise<ReversalPaymentRow | null> {
+    const columns = `"id", "company_id", "kind", "status", "amount", "currency",
+                     "subscription_starts_at", "subscription_ends_at", "paypal_response"`;
+    if (refs.orderId) {
+      const rows = (await manager.query(
+        `SELECT ${columns} FROM "payments" WHERE "paypal_order_id" = $1 FOR UPDATE`,
+        [refs.orderId],
+      )) as ReversalPaymentRow[];
+      if (rows[0]) return rows[0];
+    }
+    if (refs.captureId) {
+      const rows = (await manager.query(
+        `SELECT ${columns} FROM "payments"
+          WHERE "paypal_response" #>> '{purchase_units,0,payments,captures,0,id}' = $1
+             OR "paypal_response" #>> '{resource,id}' = $1
+          ORDER BY "created_at" DESC
+          LIMIT 1
+          FOR UPDATE`,
+        [refs.captureId],
+      )) as ReversalPaymentRow[];
+      if (rows[0]) return rows[0];
+    }
+    return null;
   }
 
   async findByCompany(companyId: string, manager?: EntityManager): Promise<Payment[]> {

@@ -40,7 +40,12 @@ function isFuture(date: Date | null, now: Date): boolean {
 
 export function computeEntitlement(company: EntitlementInput, now: Date): Entitlement {
   // 1. Admin kill switch. The only state that also blocks export.
-  if (!company.isActive && company.deactivatedAt != null) {
+  //
+  // `deactivatedAt` alone is the ban. This used to also require `!isActive`, so any
+  // path that set `isActive = true` on a banned row — a trial starting on email
+  // verification, a payment capture or renewal webhook — silently lifted the ban
+  // without an admin. Only `clearDeactivation` may lift it.
+  if (company.deactivatedAt != null) {
     return {
       status: "deactivated",
       hasAccess: false,

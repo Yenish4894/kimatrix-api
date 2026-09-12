@@ -29,50 +29,67 @@ export async function purgeExpiredCompanyData(): Promise<number> {
   // One instance at a time. Two concurrent runs would race on the same rows, and
   // while the locked re-check inside `purge` makes that safe, doing the work twice is
   // still pointless.
-  const [{ locked }] = (await AppDataSource.manager.query(
-    `SELECT pg_try_advisory_lock($1) AS locked`,
-    [ADVISORY_LOCK_KEY],
-  )) as [{ locked: boolean }];
-  if (!locked) return 0;
-
+  //
+  // The lock is session-level, so lock and unlock must run on the SAME connection.
+  // Both used to go through `AppDataSource.manager.query`, which takes whatever pooled
+  // connection is free: the unlock often landed elsewhere, failed, and the lock leaked
+  // on a pooled connection, so every later run saw `false` and silently did nothing.
+  // A dedicated QueryRunner pins one connection for the whole run.
+  const lockRunner = AppDataSource.createQueryRunner();
+  await lockRunner.connect();
   try {
-    const due = await service.findDue();
-    if (due.length === 0) return 0;
+    const [{ locked }] = (await lockRunner.query(`SELECT pg_try_advisory_lock($1) AS locked`, [
+      ADVISORY_LOCK_KEY,
+    ])) as [{ locked: boolean }];
+    if (!locked) return 0;
 
-    logger.warn(
-      {
-        count: due.length,
-        retentionDays: EXPIRY_RETENTION_DAYS,
-        companies: due.map((c) => ({
-          id: c.id,
-          name: c.name,
-          daysExpired: c.days_expired,
-          customers: c.customers,
-          purchases: c.purchases,
-        })),
-      },
-      "Expiry purge: erasing data for companies past the retention window",
-    );
-
-    let purged = 0;
-    for (const candidate of due) {
-      try {
-        // Each company in its own transaction. One failure — a lock timeout, a
-        // constraint — must not roll back the companies already handled or stop the
-        // rest of the run.
-        const result = await service.purge(candidate.id);
-        if (result) purged++;
-      } catch (err) {
-        logger.error(
-          { err, companyId: candidate.id, name: candidate.name },
-          "Expiry purge failed for one company; continuing with the rest",
-        );
-      }
+    try {
+      return await runPurge(service);
+    } finally {
+      // Same session as the lock, so this can only fail if the connection itself died
+      // — and then Postgres has already dropped the lock with the session.
+      await lockRunner.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]);
     }
-    return purged;
   } finally {
-    await AppDataSource.manager.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]);
+    await lockRunner.release();
   }
+}
+
+async function runPurge(service: ExpiredDataPurgeService): Promise<number> {
+  const due = await service.findDue();
+  if (due.length === 0) return 0;
+
+  logger.warn(
+    {
+      count: due.length,
+      retentionDays: EXPIRY_RETENTION_DAYS,
+      companies: due.map((c) => ({
+        id: c.id,
+        name: c.name,
+        daysExpired: c.days_expired,
+        customers: c.customers,
+        purchases: c.purchases,
+      })),
+    },
+    "Expiry purge: erasing data for companies past the retention window",
+  );
+
+  let purged = 0;
+  for (const candidate of due) {
+    try {
+      // Each company in its own transaction. One failure — a lock timeout, a
+      // constraint — must not roll back the companies already handled or stop the
+      // rest of the run.
+      const result = await service.purge(candidate.id);
+      if (result) purged++;
+    } catch (err) {
+      logger.error(
+        { err, companyId: candidate.id, name: candidate.name },
+        "Expiry purge failed for one company; continuing with the rest",
+      );
+    }
+  }
+  return purged;
 }
 
 export function startExpiredDataPurgeCron(): void {

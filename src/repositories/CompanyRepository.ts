@@ -39,6 +39,16 @@ export interface ExpiryNoticeTarget {
 }
 
 /**
+ * True when the company has no PayPal subscription in `active` status. Only `active`
+ * is excluded: `past_due`, `suspended` and `pending_cancel` are exactly the customers
+ * whose paid time may genuinely run out, so they must still be warned.
+ */
+const NO_ACTIVE_RECURRING_SUBSCRIPTION = `NOT EXISTS (
+            SELECT 1 FROM "subscriptions" s
+             WHERE s."company_id" = c."id" AND s."status" = 'active'
+          )`;
+
+/**
  * Column and predicate per notice. Kept as a lookup rather than three near-identical
  * methods so the guard logic exists in exactly one place — the three differ only in
  * which deadline they watch.
@@ -89,13 +99,18 @@ export const EXPIRY_NOTICE_SQL: Record<
   // A paid plan about to lapse. Trials warned before ending and paid plans did not,
   // so a paying customer's subscription simply stopped with no warning — the exact
   // customer most worth keeping. 24 hours, per the product decision.
+  //
+  // Skips anyone on a live auto-renewing PayPal subscription: their expiry moves on
+  // every renewal, which re-arms the notice, so they were told "your plan is ending"
+  // (and then "has ended") every cycle for a plan that was about to renew itself.
   subscription_ending: {
     requiresVerifiedEmail: false,
     column: "subscription_ending_notice_for",
     deadline: "subscription_expires_at",
     due: `c."subscription_expires_at" IS NOT NULL
           AND c."subscription_expires_at" > now()
-          AND c."subscription_expires_at" <= now() + interval '24 hours'`,
+          AND c."subscription_expires_at" <= now() + interval '24 hours'
+          AND ${NO_ACTIVE_RECURRING_SUBSCRIPTION}`,
   },
   // A paid subscription running out.
   subscription_ended: {
@@ -103,7 +118,8 @@ export const EXPIRY_NOTICE_SQL: Record<
     column: "subscription_ended_notice_for",
     deadline: "subscription_expires_at",
     due: `c."subscription_expires_at" IS NOT NULL
-          AND c."subscription_expires_at" <= now()`,
+          AND c."subscription_expires_at" <= now()
+          AND ${NO_ACTIVE_RECURRING_SUBSCRIPTION}`,
   },
 };
 
@@ -367,6 +383,13 @@ export class CompanyRepository {
    * increment pattern: under READ COMMITTED, Postgres re-reads the row and
    * re-evaluates the expression if a concurrent transaction updated it first, so the
    * second payment stacks on the first instead of overwriting it.
+   *
+   * Never lifts an admin ban. This used to set `is_active = true` and clear
+   * `deactivated_at`, so a capture or renewal webhook landing after a ban silently
+   * un-banned the company. Paid time still accrues (so an admin who later lifts the ban
+   * finds it intact), but `is_active` only turns on for a company that is not banned.
+   * The right-hand side reads the pre-update row, and this statement never writes
+   * `deactivated_at`, so the two cannot disagree.
    */
   async extendSubscription(
     params: {
@@ -382,10 +405,8 @@ export class CompanyRepository {
           SET "subscription_expires_at" =
                 GREATEST(COALESCE("subscription_expires_at", $2::timestamptz), $2::timestamptz)
                 + make_interval(days => $3::int),
-              "is_active" = true,
-              "current_plan_id" = $4,
-              "deactivated_at" = NULL,
-              "deactivated_by_user_id" = NULL
+              "is_active" = ("deactivated_at" IS NULL),
+              "current_plan_id" = $4
         WHERE "id" = $1
           AND "deleted_at" IS NULL
         RETURNING

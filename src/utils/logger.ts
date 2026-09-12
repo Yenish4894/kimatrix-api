@@ -33,6 +33,30 @@ export const logger = pino({
       "*.tokenHash",
       "*.token_hash",
       "*.resetToken",
+      // Personal data. Recipient addresses are logged as `to` by EmailService and the
+      // email worker, owners as `email`/`ownerEmail`, and a Postgres unique violation
+      // carries the conflicting email or mobile in `detail` (top-level, or on `err`
+      // and its `driverError`). `err.parameters` is TypeORM's bound values for the
+      // failed query — the same data again. Top level and one level down covers every
+      // call site in src today.
+      "to",
+      "email",
+      "ownerEmail",
+      "contactEmail",
+      "mobile",
+      "phone",
+      "contactPhone",
+      "detail",
+      "*.to",
+      "*.email",
+      "*.ownerEmail",
+      "*.contactEmail",
+      "*.mobile",
+      "*.phone",
+      "*.contactPhone",
+      "*.detail",
+      "err.parameters",
+      "err.driverError.detail",
     ],
     censor: "[REDACTED]",
   },

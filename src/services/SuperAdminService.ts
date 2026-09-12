@@ -634,7 +634,7 @@ export class SuperAdminService {
     companyIds: string[],
     extraEmails: string[] = [],
     attachment?: { path: string; filename: string; size: number },
-  ): Promise<{ recipientCount: number; logId: string }> {
+  ): Promise<{ recipientCount: number; logId: string; skippedOptedOut: number }> {
     if (!subject.trim()) throw BadRequestError("Subject is required.");
     if (!body.trim()) throw BadRequestError("Body is required.");
     if (!companyIds.length && !extraEmails.length) {
@@ -645,10 +645,17 @@ export class SuperAdminService {
     const found = companyIds.length
       ? await this.companyRepository.findByIdsWithOwner(companyIds)
       : [];
+    // Enforced here, not left to whoever ticks the boxes: the footer of every one of
+    // these emails promises that opting out stops them, so an admin selecting an
+    // opted-out company must not be able to break that promise. Extra addresses typed
+    // by hand are not companies and have no preference to honour.
+    const optedIn = found.filter((c) => c.promoEmailOptIn !== false);
+    const skippedOptedOut = found.length - optedIn.length;
+
     // A company whose owner row is missing would throw on `.owner.email` and take the
     // whole broadcast down with it. Skip it and deliver to everyone else instead.
-    const companies = found.filter((c) => c.owner?.email);
-    if (companies.length < found.length) {
+    const companies = optedIn.filter((c) => c.owner?.email);
+    if (companies.length < optedIn.length) {
       logger.warn(
         { requested: companyIds.length, deliverable: companies.length },
         "Bulk email: some companies have no owner email and were skipped",
@@ -667,7 +674,13 @@ export class SuperAdminService {
       recipients.push(address.trim());
     }
 
-    if (!recipients.length) throw BadRequestError("No valid recipients found.");
+    if (!recipients.length) {
+      throw BadRequestError(
+        skippedOptedOut > 0
+          ? "Every selected company has opted out of these emails."
+          : "No valid recipients found.",
+      );
+    }
 
     const emailService = new EmailService();
     const repo = AppDataSource.getRepository(BulkEmailLog);
@@ -708,11 +721,12 @@ export class SuperAdminService {
         adminId: admin.id,
         recipientCount: recipients.length,
         companies: companies.length,
+        skippedOptedOut,
         extra: extraEmails.length,
       },
       "Bulk email enqueued",
     );
-    return { recipientCount: recipients.length, logId: saved.id };
+    return { recipientCount: recipients.length, logId: saved.id, skippedOptedOut };
   }
 
   async listBulkEmailLogs(

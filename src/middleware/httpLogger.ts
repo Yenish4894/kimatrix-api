@@ -4,6 +4,12 @@ import { logger } from "@/utils/logger";
 
 const REQUEST_ID_PATTERN = /^[\w-]{1,128}$/;
 
+/**
+ * The path only, never the query string. Admin list endpoints take `?search=` with a
+ * customer's name, email or mobile, and every request line went to the logs verbatim.
+ */
+const pathOnly = (url: string | undefined): string => (url ?? "").split("?")[0] ?? "";
+
 export const httpLogger = pinoHttp({
   logger,
   genReqId: (req, res) => {
@@ -23,7 +29,7 @@ export const httpLogger = pinoHttp({
       return {
         id: req.id,
         method: req.method,
-        url: req.url,
+        url: pathOnly(req.url),
         remoteAddress: req.remoteAddress,
       };
     },
@@ -33,7 +39,7 @@ export const httpLogger = pinoHttp({
       };
     },
   },
-  customSuccessMessage: (req, res) => `${req.method} ${req.url} ${res.statusCode}`,
+  customSuccessMessage: (req, res) => `${req.method} ${pathOnly(req.url)} ${res.statusCode}`,
   customErrorMessage: (req, res, err) =>
-    `${req.method} ${req.url} ${res.statusCode} ${err.message}`,
+    `${req.method} ${pathOnly(req.url)} ${res.statusCode} ${err.message}`,
 });

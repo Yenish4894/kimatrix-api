@@ -1,8 +1,17 @@
+import type { EntityManager } from "typeorm";
 import { AppDataSource } from "data-source";
 import { SubscriptionService } from "@/services/SubscriptionService";
 import { PaypalService } from "@/services/PaypalService";
+import { PaymentRepository } from "@/repositories/PaymentRepository";
 import { returningRows } from "@/utils/db";
 import { logger } from "@/utils/logger";
+import { classifyReversal, reversalRefs, type ReversalEventType } from "@/utils/paypalBilling";
+
+/**
+ * `admin_audit_log.actor_email` is NOT NULL while `actor_user_id` is nullable, so a
+ * system-initiated row carries no user and this marker instead.
+ */
+const SYSTEM_ACTOR_EMAIL = "system:paypal-webhook";
 
 interface WebhookEvent {
   id?: string;
@@ -32,6 +41,7 @@ interface WebhookEvent {
 export class PaypalWebhookService {
   private subscriptionService = new SubscriptionService();
   private paypalService = new PaypalService();
+  private paymentRepository = new PaymentRepository();
 
   /**
    * @returns false when the event was a duplicate or is of no interest to us.
@@ -140,10 +150,12 @@ export class PaypalWebhookService {
       case "PAYMENT.SALE.REVERSED": {
         const billingAgreementId = resource["billing_agreement_id"];
         if (typeof billingAgreementId !== "string") return;
-        // Deliberately does NOT revoke access. PayPal retries a failed payment inside a
-        // period the customer has already paid for, so cutting them off here would be
-        // wrong; the state is reflected as `past_due` and the natural expiry handles
-        // the rest if it is never paid.
+        // Deliberately does NOT revoke access. Renewals are charged a day before the
+        // current access end, so a failed renewal is retried by PayPal while the
+        // customer still holds time from the previous, successfully paid cycle; a sale
+        // that failed was never credited, so there is nothing to take back. The state
+        // is reflected as `past_due` and the natural expiry handles the rest if it is
+        // never paid.
         const remote = await this.paypalService.getSubscription(billingAgreementId);
         if (!remote) return;
         await this.subscriptionService.applyRemoteState(
@@ -154,8 +166,196 @@ export class PaypalWebhookService {
         return;
       }
 
+      // ── Orders-era money going back ───────────────────────────────────────
+      case "PAYMENT.CAPTURE.REFUNDED":
+      case "PAYMENT.CAPTURE.REVERSED":
+      case "PAYMENT.CAPTURE.DENIED":
+        await this.handleCaptureReversal(eventType, resource);
+        return;
+
       default:
         logger.info({ eventType }, "Webhook type not handled");
     }
+  }
+
+  /**
+   * A one-time capture was refunded, charged back or denied after we recorded it.
+   *
+   * Previously these fell through to "not handled", so a refunded customer kept the
+   * access (and the draw spins) they had been paid back for.
+   *
+   * Idempotent at two levels: the webhook-event claim in `handle` stops the same event
+   * twice, and a payment already `refunded` is left alone, so a different event for
+   * the same capture (a REVERSED after a REFUNDED, say) cannot subtract access twice.
+   *
+   * A partial refund is recorded and flagged but takes nothing away. Deciding how many
+   * days a partial refund is worth is a judgement call for a human, and wrongly locking
+   * out a paying customer is the worse error.
+   */
+  private async handleCaptureReversal(
+    eventType: ReversalEventType,
+    resource: Record<string, unknown>,
+  ): Promise<void> {
+    const refs = reversalRefs(eventType, resource);
+    if (!refs.orderId && !refs.captureId) {
+      logger.warn(
+        { eventType, resourceId: resource["id"] },
+        "Reversal without a capture reference",
+      );
+      return;
+    }
+
+    await AppDataSource.transaction(async (manager) => {
+      const payment = await this.paymentRepository.findForReversalForUpdate(refs, manager);
+      if (!payment) {
+        // Not thrown: no retry will ever make an unknown capture known, and throwing
+        // would have PayPal retry for days. Loud enough for someone to reconcile by hand.
+        logger.error({ eventType, ...refs }, "Reversal for a capture we have no payment for");
+        return;
+      }
+      if (payment.status === "refunded") {
+        logger.info({ eventType, paymentId: payment.id }, "Payment already reversed — no-op");
+        return;
+      }
+
+      const extent = classifyReversal(eventType, resource, payment.amount);
+      const reversalId = typeof resource["id"] === "string" ? resource["id"] : null;
+      const entry = {
+        event_type: eventType,
+        id: reversalId,
+        status: resource["status"] ?? null,
+        amount: resource["amount"] ?? null,
+        extent,
+        received_at: new Date().toISOString(),
+      };
+      // Appended rather than overwriting `paypal_response`: the capture body is how a
+      // later reversal event finds this row by capture id.
+      const appendEntrySql = `COALESCE("paypal_response", '{}'::jsonb)
+        || jsonb_build_object('reversals',
+             COALESCE("paypal_response"->'reversals', '[]'::jsonb) || $2::jsonb)`;
+
+      if (extent === "partial") {
+        const seen = Array.isArray(payment.paypal_response?.["reversals"])
+          ? (payment.paypal_response["reversals"] as { id?: unknown }[]).some(
+              (r) => reversalId != null && r?.id === reversalId,
+            )
+          : false;
+        if (seen) return;
+        await manager.query(
+          `UPDATE "payments" SET "paypal_response" = ${appendEntrySql} WHERE "id" = $1`,
+          [payment.id, JSON.stringify([entry])],
+        );
+        await this.audit(manager, "payment.partial_refund", payment.id, {
+          before: { status: payment.status },
+          after: { status: payment.status, refund: entry },
+          note: "Partial refund — access left unchanged; review manually",
+        });
+        logger.warn(
+          { paymentId: payment.id, companyId: payment.company_id, refund: entry },
+          "Partial PayPal refund — payment flagged, access NOT revoked",
+        );
+        return;
+      }
+
+      // A DENIED capture we never recorded as captured was simply never paid; `failed`
+      // describes it better than `refunded`. Everything else is money returned.
+      const wasCaptured = payment.status === "captured";
+      const newStatus =
+        !wasCaptured && eventType === "PAYMENT.CAPTURE.DENIED" ? "failed" : "refunded";
+      await manager.query(
+        `UPDATE "payments"
+            SET "status" = $3, "paypal_response" = ${appendEntrySql}, "updated_at" = now()
+          WHERE "id" = $1`,
+        [payment.id, JSON.stringify([entry]), newStatus],
+      );
+
+      // Take back exactly the window this order added. Only an `order` grants access
+      // (a `spin_addon` is withdrawn by the status change alone: spins count only
+      // `captured` payments). Subtracting the window's length rather than resetting to
+      // its start keeps any time bought after it — later orders or renewals stacked
+      // on top by GREATEST(...) + interval.
+      let access: { before: Date | null; after: Date | null } | null = null;
+      if (
+        wasCaptured &&
+        payment.kind === "order" &&
+        payment.subscription_starts_at &&
+        payment.subscription_ends_at
+      ) {
+        const locked = returningRows<{ subscription_expires_at: Date | null }>(
+          await manager.query(
+            `SELECT "subscription_expires_at" FROM "companies" WHERE "id" = $1 FOR UPDATE`,
+            [payment.company_id],
+          ),
+        )[0];
+        const updated = returningRows<{ subscription_expires_at: Date | null }>(
+          await manager.query(
+            `UPDATE "companies"
+                SET "subscription_expires_at" =
+                      "subscription_expires_at" - ($3::timestamptz - $2::timestamptz),
+                    "subscription_ended_notice_for" = NULL
+              WHERE "id" = $1 AND "subscription_expires_at" IS NOT NULL
+              RETURNING "subscription_expires_at"`,
+            [payment.company_id, payment.subscription_starts_at, payment.subscription_ends_at],
+          ),
+        )[0];
+        access = {
+          before: locked?.subscription_expires_at ?? null,
+          after: updated?.subscription_expires_at ?? null,
+        };
+      }
+
+      await this.audit(manager, "payment.refund", payment.id, {
+        before: {
+          status: payment.status,
+          ...(access ? { subscriptionExpiresAt: access.before } : {}),
+        },
+        after: {
+          status: newStatus,
+          reversal: entry,
+          ...(access ? { subscriptionExpiresAt: access.after } : {}),
+        },
+        note: `${eventType} (${payment.kind})`,
+      });
+
+      logger.warn(
+        {
+          eventType,
+          paymentId: payment.id,
+          companyId: payment.company_id,
+          kind: payment.kind,
+          newStatus,
+          access,
+        },
+        "PayPal capture reversed — payment marked and access withdrawn",
+      );
+    });
+  }
+
+  /**
+   * Raw insert into `admin_audit_log` rather than AuditService: that service requires a
+   * user id and a typed admin action, and this row has no human actor. The FK column is
+   * nullable (it is SET NULL on user deletion), which is what makes a system row legal.
+   * Written in the caller's transaction so the trail cannot disagree with the change.
+   */
+  private async audit(
+    manager: EntityManager,
+    action: "payment.refund" | "payment.partial_refund",
+    paymentId: string,
+    data: { before: Record<string, unknown>; after: Record<string, unknown>; note: string },
+  ): Promise<void> {
+    await manager.query(
+      `INSERT INTO "admin_audit_log"
+         ("actor_user_id", "actor_email", "action", "entity_type", "entity_id",
+          "before", "after", "note")
+       VALUES (NULL, $1, $2, 'payment', $3, $4, $5, $6)`,
+      [
+        SYSTEM_ACTOR_EMAIL,
+        action,
+        paymentId,
+        JSON.stringify(data.before),
+        JSON.stringify(data.after),
+        data.note.slice(0, 255),
+      ],
+    );
   }
 }

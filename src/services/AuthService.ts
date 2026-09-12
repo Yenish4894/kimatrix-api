@@ -269,8 +269,9 @@ export class AuthService {
       if (!company) {
         throw UnauthorizedError("Invalid credentials");
       }
-      // Deactivated (admin-disabled after activation) — hard block, no tokens
-      if (!company.isActive && company.deactivatedAt != null) {
+      // Deactivated (admin ban) — hard block, no tokens. `deactivatedAt` alone is the
+      // ban; see computeEntitlement for why `isActive` is not consulted.
+      if (company.deactivatedAt != null) {
         throw ForbiddenError("Your account has been deactivated. Please contact support.");
       }
       // Pending (registered, not yet subscribed) — issue tokens so they can reach /billing
@@ -361,7 +362,7 @@ export class AuthService {
           throw UnauthorizedError("Company profile unavailable");
         }
         // Deactivated companies lose their session; pending companies keep theirs
-        if (company.deactivatedAt != null && !company.isActive) {
+        if (company.deactivatedAt != null) {
           throw UnauthorizedError("Company profile unavailable");
         }
         companyId = company.id;
@@ -545,8 +546,12 @@ export class AuthService {
         // who has already paid.
         if (user.userType === "company") {
           const company = await this.companyRepository.findByOwnerUserId(user.id, manager);
+          // Never on a banned company. Starting a trial writes `isActive: true`, which
+          // was one of the paths that lifted a ban without an admin. Checked before
+          // the identity claim too, so a banned account does not burn the identifiers.
           if (
             company &&
+            company.deactivatedAt == null &&
             company.trialStartedAt === null &&
             company.subscriptionExpiresAt === null
           ) {

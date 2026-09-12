@@ -25,32 +25,52 @@ jobs:
             echo ">>> Pulling latest code..."
             git pull origin main
 
+            # `npm ci`, not `npm install`: it installs exactly what the lockfile says and
+            # fails if package.json and the lockfile disagree, instead of quietly
+            # resolving different versions on the server than were tested.
             echo ">>> Installing dependencies..."
-            npm install --production=false
+            npm ci --include=dev
 
-            # tsc does not prune dist, so files deleted from src linger as stale JS.
-            # This bit us with migrations: dist/migrations still held the four
-            # pre-consolidation migrations that 1777400000000-initialSchema.ts
-            # replaced. TypeORM loads every file in that directory, so on any
-            # rebuilt-from-scratch server it would have tried to run superseded
-            # migrations. Removing already-applied files is safe — `migration:run`
-            # only executes files that are NOT recorded in the migrations table.
-            echo ">>> Cleaning stale build output..."
-            rm -rf dist
+            # tsc does not prune dist, so files deleted from src would linger as stale
+            # JS — that once left superseded migrations in dist/migrations. So dist is
+            # rebuilt from scratch, but the previous build is kept aside first: this
+            # used to `rm -rf dist` and then build, so a failed build left the API
+            # running from memory with nothing on disk — one crash or reboot from down.
+            echo ">>> Keeping the previous build..."
+            rm -rf dist.prev
+            if [ -d dist ]; then cp -a dist dist.prev; fi
+            restore_previous_build() {
+              echo ">>> Restoring the previous build"
+              rm -rf dist
+              if [ -d dist.prev ]; then mv dist.prev dist; fi
+            }
 
             echo ">>> Building..."
-            npm run build
+            rm -rf dist
+            if ! npm run build; then
+              restore_previous_build
+              exit 1
+            fi
 
             echo ">>> Running migrations..."
-            NODE_ENV=production npm run migration:run
+            if ! NODE_ENV=production npm run migration:run; then
+              restore_previous_build
+              exit 1
+            fi
 
+            # A 12s kill timeout lets the 10s graceful shutdown in server.ts finish
+            # in-flight PayPal captures; pm2's default (1.6s) cut it off. Falls back to
+            # a plain restart if this pm2 doesn't take the flag on restart.
             echo ">>> Restarting backend..."
-            pm2 restart kimatrix-api
+            pm2 restart kimatrix-api --kill-timeout 12000 || pm2 restart kimatrix-api
 
-            echo ">>> Waiting for startup..."
-            sleep 5
+            # /ready, not /health: /health answers even with the database or Redis
+            # down, so a deploy could "pass" while every real request failed.
+            echo ">>> Readiness check..."
+            if ! curl -sf --retry 10 --retry-delay 3 --retry-all-errors http://127.0.0.1:9420/ready -o /dev/null; then
+              pm2 logs kimatrix-api --lines 40 --nostream
+              exit 1
+            fi
 
-            echo ">>> Health check..."
-            curl -sf --retry 5 --retry-delay 2 http://127.0.0.1:9420/health || (pm2 logs kimatrix-api --lines 20 --nostream && exit 1)
-
+            rm -rf dist.prev
             echo ">>> Deploy complete!"

@@ -37,7 +37,10 @@ app.use(
     },
   }),
 );
-app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+// `extended: false` (the querystring parser, not `qs`). Nothing sends nested
+// urlencoded bodies — the API is JSON, uploads are multipart via multer — and `qs`'s
+// nested-object parsing is attack surface we get nothing for.
+app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 
 app.get("/health", (_req, res) => {
   res.json({

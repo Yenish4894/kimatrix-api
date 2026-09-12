@@ -10,11 +10,12 @@ import { BadRequestError, ConflictError, NotFoundError } from "@/errors/index";
 import { computeEntitlement } from "@/utils/entitlement";
 import { returningRows } from "@/utils/db";
 import { logger } from "@/utils/logger";
+import { billingStartTime } from "@/utils/paypalBilling";
 
 export interface SubscribeResult {
   subscriptionId: string;
   approvalUrl: string;
-  /** When billing starts — today, or when existing paid/trial time runs out. */
+  /** When billing starts — now, or a day before existing paid/trial time runs out. */
   startsAt: Date;
 }
 
@@ -49,7 +50,9 @@ export class SubscriptionService {
    * The important part is `startTime`. A customer converting mid-trial, or one with
    * Orders-era time still on the clock, must not be charged until that runs out —
    * otherwise subscribing early costs them the days they already have. So billing
-   * starts at whichever is later: now, or their current access end.
+   * starts at whichever is later: now, or 24 hours before their current access end.
+   * The day's lead stops access lapsing while the charge's webhook is in flight; it is
+   * free to the customer because creditCycle stacks each period onto existing time.
    *
    * That single rule covers both coexistence cases, which is why there is no separate
    * migration path for legacy Orders customers: they simply subscribe when they are
@@ -77,13 +80,12 @@ export class SubscriptionService {
       );
     }
 
-    // Later of now and current access end. PayPal rejects a start time in the past, and
-    // "now" as computed here is always a few seconds stale by the time the request
-    // lands, so add a small cushion.
+    // A day BEFORE the current access end, never before now. Charging exactly at the
+    // end left access lapsed between expiry and PAYMENT.SALE.COMPLETED, so the paywall
+    // hit paying customers every cycle. Charging early costs them nothing: creditCycle
+    // stacks each period onto the existing expiry (and onto a live trial's end).
     const entitlement = computeEntitlement(company, new Date());
-    const earliest = new Date(Date.now() + 60_000);
-    const startsAt =
-      entitlement.endsAt && entitlement.endsAt > earliest ? entitlement.endsAt : earliest;
+    const startsAt = billingStartTime(entitlement.endsAt, new Date());
 
     // Create the local row FIRST, inside a transaction. The partial unique index
     // `uq_subscriptions_one_live_per_company` is what stops two tabs both reaching
@@ -160,6 +162,7 @@ export class SubscriptionService {
     paypalSubscriptionId: string,
     remote: {
       status: string;
+      plan_id?: string;
       billing_info?: { next_billing_time?: string; failed_payments_count?: number };
     },
     eventTime?: Date,
@@ -227,6 +230,29 @@ export class SubscriptionService {
         paypalResponse: remote as unknown as Record<string, never>,
       });
 
+      // PayPal is the authority on which plan the subscription is on. Without this, a
+      // plan change that needed buyer approval was never recorded locally — changePlan
+      // defers the write until approval and nothing else wrote it. Mapped through
+      // `plans.paypal_plan_id`; when several versions share one PayPal plan, the one
+      // already stored wins, otherwise the newest. No match leaves the row alone.
+      if (remote.plan_id) {
+        await manager.query(
+          // The stored plan is read through its own scalar subquery. An earlier version
+          // referenced a sibling FROM item from inside `m`, which Postgres rejects
+          // ("missing FROM-clause entry") — caught by EXPLAIN against the real schema.
+          `UPDATE "subscriptions" s
+              SET "plan_id" = m."id"
+             FROM (SELECT p."id" FROM "plans" p
+                    WHERE p."paypal_plan_id" = $2
+                    ORDER BY (p."id" = (SELECT s0."plan_id" FROM "subscriptions" s0
+                                         WHERE s0."id" = $1)) DESC,
+                             p."created_at" DESC
+                    LIMIT 1) m
+            WHERE s."id" = $1 AND s."plan_id" IS DISTINCT FROM m."id"`,
+          [sub.id, remote.plan_id],
+        );
+      }
+
       if (status === "active" || status === "past_due") {
         await manager
           .getRepository(Company)
@@ -251,29 +277,81 @@ export class SubscriptionService {
     amount: string;
     currency: string;
   }): Promise<boolean> {
+    // Which plan this sale belongs to. The stored plan_id is not reliable for that: a
+    // plan change that needs no approval rewrites it at once, and one that does is
+    // recorded only when PayPal reports it. Read PayPal's view BEFORE the transaction
+    // so no connection is held across the HTTP call. Failure is not fatal — we fall
+    // back to the stored plan, which is exactly the previous behaviour.
+    const remotePlanId = await this.paypalService
+      .getSubscription(params.paypalSubscriptionId)
+      .then((r) => r?.plan_id ?? null)
+      .catch((err: unknown) => {
+        logger.warn({ err, ...params }, "Could not read subscription plan; using stored plan");
+        return null;
+      });
+
     return AppDataSource.transaction(async (manager) => {
       // Same reasoning as applyRemoteState: FOR UPDATE cannot be combined with a LEFT
       // JOIN in Postgres, and we only want to lock the subscription row anyway — not
       // the company and plan rows a join would drag in.
-      const sub = returningRows<{
+      const locked = returningRows<{
         id: string;
         company_id: string;
         plan_id: string;
-        duration_days: number;
+        trial_ends_at: Date | null;
       }>(
         await manager.query(
-          `SELECT s."id", s."company_id", s."plan_id", p."duration_days"
+          `SELECT s."id", s."company_id", s."plan_id", c."trial_ends_at"
              FROM "subscriptions" s
-             JOIN "plans" p ON p."id" = s."plan_id"
+             JOIN "companies" c ON c."id" = s."company_id"
             WHERE s."paypal_subscription_id" = $1
             FOR UPDATE OF s`,
           [params.paypalSubscriptionId],
         ),
       )[0];
-      if (!sub) {
+      if (!locked) {
         logger.warn({ ...params }, "Cycle payment for an unknown subscription");
         return false;
       }
+
+      // Candidates: the plan PayPal reports, the stored plan, and the plan of the last
+      // cycle we credited (the pre-change plan, when a change just happened). The sale
+      // amount is the only real evidence of which plan was charged, so a price match
+      // wins; otherwise PayPal's plan, then the stored one.
+      const plan = returningRows<{ id: string; duration_days: number }>(
+        await manager.query(
+          `SELECT p."id", p."duration_days"
+             FROM "plans" p
+            WHERE p."id" = $2
+               OR ($1::varchar IS NOT NULL AND p."paypal_plan_id" = $1::varchar)
+               OR p."id" = (SELECT "plan_id" FROM "payments"
+                             WHERE "subscription_id" = $3 AND "kind" = 'subscription_cycle'
+                             ORDER BY "created_at" DESC LIMIT 1)
+            ORDER BY (p."price" = $4::numeric AND p."currency" = $5) DESC,
+                     COALESCE(p."paypal_plan_id" = $1::varchar, false) DESC,
+                     (p."id" = $2) DESC,
+                     p."created_at" DESC
+            LIMIT 1`,
+          [remotePlanId, locked.plan_id, locked.id, params.amount, params.currency],
+        ),
+      )[0];
+      if (!plan) {
+        // Unreachable while plans are never deleted (FK RESTRICT), but a throw here
+        // makes PayPal retry rather than silently dropping a paid cycle.
+        throw new Error(`creditCycle: no plan for subscription ${locked.id}`);
+      }
+      const sub = {
+        id: locked.id,
+        company_id: locked.company_id,
+        plan_id: plan.id,
+        duration_days: plan.duration_days,
+      };
+      // Renewals are charged a day before access ends, and the first charge may land
+      // while a trial is still running. Trial time lives in `trial_ends_at`, not in
+      // `subscription_expires_at`, so floor the stacking point at the trial end or the
+      // converting customer loses the rest of their trial.
+      const trialEnd = locked.trial_ends_at ? new Date(locked.trial_ends_at) : null;
+      const creditFrom = trialEnd && trialEnd > new Date() ? trialEnd : new Date();
 
       const inserted = returningRows<{ id: string }>(
         await manager.query(
@@ -300,7 +378,7 @@ export class SubscriptionService {
             companyId: sub.company_id,
             planId: sub.plan_id,
             durationDays: sub.duration_days,
-            now: new Date(),
+            now: creditFrom,
           },
           manager,
         );
