@@ -16,6 +16,79 @@ export interface ReversalPaymentRow {
   paypal_response: Record<string, unknown> | null;
 }
 
+/** One payment as shown in payment history. snake_case: straight from SQL. */
+export interface PaymentHistoryRow {
+  id: string;
+  kind: PaymentKind;
+  status: PaymentStatus;
+  amount: string;
+  currency: string;
+  captured_at: Date | null;
+  created_at: Date;
+  subscription_starts_at: Date | null;
+  subscription_ends_at: Date | null;
+  draw_spins: number;
+  paypal_order_id: string | null;
+  paypal_sale_id: string | null;
+  plan_name: string | null;
+  company_id: string;
+  company_name: string;
+}
+
+/** History row plus the bill-to block an invoice prints. */
+export interface InvoicePaymentRow extends PaymentHistoryRow {
+  registration_number: string | null;
+  street_address: string | null;
+  city: string | null;
+  state: string | null;
+  postal_code: string | null;
+  country: string | null;
+  contact_email: string | null;
+}
+
+export interface AdminPaymentFilters {
+  page: number;
+  limit: number;
+  status?: PaymentStatus;
+  kind?: PaymentKind;
+  search?: string;
+  from?: Date;
+  to?: Date;
+}
+
+const HISTORY_COLUMNS = `p."id", p."kind", p."status", p."amount", p."currency",
+       p."captured_at", p."created_at", p."subscription_starts_at", p."subscription_ends_at",
+       p."draw_spins", p."paypal_order_id", p."paypal_sale_id",
+       pl."name" AS "plan_name", c."id" AS "company_id", c."name" AS "company_name"`;
+
+// LEFT JOIN on plans: plan_id is NOT NULL today, but an invoice must still render if a
+// plan row ever went missing. Archived (soft-deleted) plans are joined on purpose, since
+// a receipt names the plan that was bought, not the one on sale now.
+const HISTORY_FROM = `FROM "payments" p
+  JOIN "companies" c ON c."id" = p."company_id"
+  LEFT JOIN "plans" pl ON pl."id" = p."plan_id"`;
+
+/** Escape LIKE wildcards so a company named "100%" searches for itself. */
+function likePattern(term: string): string {
+  return `%${term.replaceAll(/[\\%_]/g, "\\$&")}%`;
+}
+
+/**
+ * The exclusive upper bound for a `to` filter.
+ *
+ * A date-only value ("2026-09-13") arrives from Joi as midnight UTC, and `<=` midnight
+ * would drop everything that happened on the day the admin actually picked. Midnight
+ * is therefore read as "through the end of that day"; any other instant is inclusive.
+ */
+export function exclusiveUpperBound(to: Date): Date {
+  const isMidnight =
+    to.getUTCHours() === 0 &&
+    to.getUTCMinutes() === 0 &&
+    to.getUTCSeconds() === 0 &&
+    to.getUTCMilliseconds() === 0;
+  return new Date(to.getTime() + (isMidnight ? 24 * 60 * 60 * 1000 : 1));
+}
+
 export class PaymentRepository {
   private getRepo(manager?: EntityManager): Repository<Payment> {
     return manager ? manager.getRepository(Payment) : AppDataSource.getRepository(Payment);
@@ -196,6 +269,98 @@ export class PaymentRepository {
       if (rows[0]) return rows[0];
     }
     return null;
+  }
+
+  /**
+   * A company's own billing history: only money that actually moved (captured, or
+   * captured then refunded). Pending and failed attempts are noise to a customer.
+   * Ordered by when it was paid, falling back to creation for safety.
+   */
+  async listHistoryForCompany(
+    companyId: string,
+    page: number,
+    limit: number,
+  ): Promise<{ items: PaymentHistoryRow[]; total: number }> {
+    const where = `WHERE p."company_id" = $1
+         AND p."status" IN ('captured', 'refunded')
+         AND p."deleted_at" IS NULL`;
+    const [items, count] = await Promise.all([
+      AppDataSource.query(
+        `SELECT ${HISTORY_COLUMNS}
+           ${HISTORY_FROM}
+          ${where}
+          ORDER BY COALESCE(p."captured_at", p."created_at") DESC, p."id" DESC
+          LIMIT $2 OFFSET $3`,
+        [companyId, limit, (page - 1) * limit],
+      ) as Promise<PaymentHistoryRow[]>,
+      AppDataSource.query(`SELECT COUNT(*)::int AS "total" FROM "payments" p ${where}`, [
+        companyId,
+      ]) as Promise<{ total: number }[]>,
+    ]);
+    return { items, total: count[0]?.total ?? 0 };
+  }
+
+  /** Every company's payments, every status unless filtered. */
+  async listHistoryForAdmin(
+    f: AdminPaymentFilters,
+  ): Promise<{ items: PaymentHistoryRow[]; total: number }> {
+    const conds = [`p."deleted_at" IS NULL`];
+    const params: unknown[] = [];
+    const add = (sql: (n: string) => string, value: unknown) => {
+      params.push(value);
+      conds.push(sql(`$${params.length}`));
+    };
+    if (f.status) add((n) => `p."status" = ${n}`, f.status);
+    if (f.kind) add((n) => `p."kind" = ${n}`, f.kind);
+    if (f.search && f.search.trim() !== "") {
+      add((n) => `c."name" ILIKE ${n}`, likePattern(f.search.trim()));
+    }
+    if (f.from) add((n) => `p."created_at" >= ${n}`, f.from);
+    if (f.to) add((n) => `p."created_at" < ${n}`, exclusiveUpperBound(f.to));
+    const where = `WHERE ${conds.join(" AND ")}`;
+
+    const [items, count] = await Promise.all([
+      AppDataSource.query(
+        `SELECT ${HISTORY_COLUMNS}
+           ${HISTORY_FROM}
+          ${where}
+          ORDER BY p."created_at" DESC, p."id" DESC
+          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, f.limit, (f.page - 1) * f.limit],
+      ) as Promise<PaymentHistoryRow[]>,
+      AppDataSource.query(
+        `SELECT COUNT(*)::int AS "total"
+           FROM "payments" p
+           JOIN "companies" c ON c."id" = p."company_id"
+          ${where}`,
+        params,
+      ) as Promise<{ total: number }[]>,
+    ]);
+    return { items, total: count[0]?.total ?? 0 };
+  }
+
+  /**
+   * One invoiceable payment. `companyId` scopes it to the caller's own company; pass
+   * null for admin. A payment that exists but belongs to someone else comes back as
+   * null, the same as one that does not exist, so the route can 404 without revealing
+   * which ids are real.
+   */
+  async findInvoiceRow(
+    paymentId: string,
+    companyId: string | null,
+  ): Promise<InvoicePaymentRow | null> {
+    const rows = (await AppDataSource.query(
+      `SELECT ${HISTORY_COLUMNS},
+              c."registration_number", c."street_address", c."city", c."state",
+              c."postal_code", c."country", c."contact_email"
+         ${HISTORY_FROM}
+        WHERE p."id" = $1
+          AND p."status" IN ('captured', 'refunded')
+          AND p."deleted_at" IS NULL
+          AND ($2::uuid IS NULL OR p."company_id" = $2::uuid)`,
+      [paymentId, companyId],
+    )) as InvoicePaymentRow[];
+    return rows[0] ?? null;
   }
 
   async findByCompany(companyId: string, manager?: EntityManager): Promise<Payment[]> {

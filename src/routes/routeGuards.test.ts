@@ -39,9 +39,16 @@ describe("company routes", () => {
   const src = source("company.route.ts");
   const all = routes(src);
 
-  // Reachable whatever the subscription state: the profile, and the QR off switch
-  // (pausing grants nothing, and a lapsed company must be able to stop its poster).
-  const OPEN = new Set(["GET /profile", "PUT /profile", "PATCH /qr/paused"]);
+  // Reachable whatever the subscription state: the profile, the QR off switch (pausing
+  // grants nothing, and a lapsed company must be able to stop its poster), and payment
+  // history with its invoices (receipts for money already paid grant nothing either).
+  const OPEN = new Set([
+    "GET /profile",
+    "PUT /profile",
+    "PATCH /qr/paused",
+    "GET /payments",
+    "GET /payments/:paymentId/invoice.pdf",
+  ]);
   // "Download your data and leave": must survive a lapsed plan, so it is gated on
   // canExport and must never pick up the paywall.
   const isExportLike = (key: string) =>
@@ -91,6 +98,17 @@ describe("admin routes", () => {
       all.every((r) => r.index > use),
       "an admin route is declared before the guard",
     );
+  });
+
+  it("declares the payments ledger, invoices and system status behind that guard", () => {
+    const keys = new Set(all.map((r) => r.key));
+    for (const key of [
+      "GET /system-status",
+      "GET /payments",
+      "GET /payments/:paymentId/invoice.pdf",
+    ]) {
+      assert.ok(keys.has(key), `${key} is missing from admin.route.ts`);
+    }
   });
 });
 

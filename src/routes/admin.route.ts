@@ -21,13 +21,40 @@ import {
   updateSettingsSchema,
   sendBulkEmailSchema,
 } from "@/validation/schemas/admin.schema";
+import {
+  listAdminPaymentsQuerySchema,
+  paymentIdParamSchema,
+  systemStatusQuerySchema,
+} from "@/validation/schemas/payment.schema";
+import { PaymentHistoryController } from "@/controllers/PaymentHistoryController";
 
 const router = Router();
 const controller = new SuperAdminController();
+const paymentHistoryController = new PaymentHistoryController();
 
 router.use(superAdminMiddleware);
 
 router.get("/stats", controller.getPlatformStats);
+
+// Third-party health (DB, Redis, SMTP, PayPal, email queue). Cached 60s server-side;
+// ?refresh=1 forces a fresh run. Exists because a suspended mailbox went unnoticed.
+router.get(
+  "/system-status",
+  validateRequest(systemStatusQuerySchema, ValidationTarget.QUERY),
+  controller.getSystemStatus,
+);
+
+// ─── Payments ledger and invoices (all companies) ───────────────
+router.get(
+  "/payments",
+  validateRequest(listAdminPaymentsQuerySchema, ValidationTarget.QUERY),
+  paymentHistoryController.listAdminPayments,
+);
+router.get(
+  "/payments/:paymentId/invoice.pdf",
+  validateRequest(paymentIdParamSchema, ValidationTarget.PARAMS),
+  paymentHistoryController.downloadAdminInvoice,
+);
 
 router.get(
   "/companies",

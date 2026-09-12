@@ -42,6 +42,19 @@ async function parsePaypalError(
   }
 }
 
+/** `invalid_client: Client Authentication failed` from an OAuth error body, or nothing. */
+function tokenErrorSummary(raw: string): string {
+  try {
+    const body = JSON.parse(raw) as { error?: unknown; error_description?: unknown };
+    const parts = [body.error, body.error_description].filter(
+      (p): p is string => typeof p === "string" && p.length > 0,
+    );
+    return parts.join(": ").slice(0, 200);
+  } catch {
+    return "";
+  }
+}
+
 export interface PaypalOrderResult {
   id: string;
   status: string;
@@ -88,6 +101,7 @@ export class PaypalService {
   private baseUrl: string;
   private cachedToken: string | null = null;
   private tokenExpiresAt = 0;
+  private lastTokenError: string | null = null;
 
   constructor() {
     this.baseUrl =
@@ -117,6 +131,9 @@ export class PaypalService {
     if (!res.ok) {
       const { raw } = await parsePaypalError(res);
       logger.error({ status: res.status, body: raw }, "PayPal token fetch failed");
+      // Kept for verifyCredentials. OAuth errors are `{ error, error_description }`,
+      // which name the problem ("invalid_client") without echoing any credential.
+      this.lastTokenError = `${res.status} ${tokenErrorSummary(raw)}`.trim();
       throw new AppError(
         "The payment service is temporarily unavailable. Please try again shortly.",
         502,
@@ -129,6 +146,31 @@ export class PaypalService {
     // subtract 60s buffer so we refresh before expiry
     this.tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
     return this.cachedToken;
+  }
+
+  /**
+   * Health check for the admin system-status page: can we obtain a token right now?
+   *
+   * Goes through `getAccessToken`, so it exercises exactly the path real payments use.
+   * Callers wanting a live answer should use a fresh instance (empty token cache).
+   * Returns rather than throws, with PayPal's status and error code for the detail
+   * line — `getAccessToken` deliberately throws only a customer-safe message.
+   */
+  async verifyCredentials(): Promise<{ ok: true } | { ok: false; detail: string }> {
+    try {
+      await this.getAccessToken();
+      return { ok: true };
+    } catch (err) {
+      const detail =
+        err instanceof AppError
+          ? (this.lastTokenError ?? err.message)
+          : err instanceof Error
+            ? err.name === "AbortError"
+              ? "ETIMEDOUT: PayPal did not respond"
+              : err.message
+            : String(err);
+      return { ok: false, detail };
+    }
   }
 
   async createOrder(opts: {

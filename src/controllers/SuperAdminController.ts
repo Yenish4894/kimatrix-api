@@ -14,6 +14,7 @@ import { SuperAdminService } from "@/services/SuperAdminService";
 import { PlanService } from "@/services/PlanService";
 import { SettingsService } from "@/services/SettingsService";
 import { AuditService } from "@/services/AuditService";
+import { SystemStatusService } from "@/services/SystemStatusService";
 import { UnauthorizedError } from "@/errors/index";
 import type {
   CreatePlanBody,
@@ -27,6 +28,7 @@ export class SuperAdminController extends BaseController {
   private planService = new PlanService();
   private settingsService = new SettingsService();
   private auditService = new AuditService();
+  private systemStatusService = new SystemStatusService();
 
   listCompanies = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
@@ -85,6 +87,13 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       const stats = await this.service.getPlatformStats();
       return { data: stats };
+    });
+  };
+
+  getSystemStatus = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { refresh } = req.query as unknown as { refresh?: boolean };
+      return { data: await this.systemStatusService.getStatus(refresh === true) };
     });
   };
 

@@ -15,9 +15,15 @@ import {
   updateProfileSchema,
   setQrPausedSchema,
 } from "@/validation/schemas/company.schema";
+import {
+  listCompanyPaymentsQuerySchema,
+  paymentIdParamSchema,
+} from "@/validation/schemas/payment.schema";
+import { PaymentHistoryController } from "@/controllers/PaymentHistoryController";
 
 const router = Router();
 const controller = new CompanyController();
+const paymentHistoryController = new PaymentHistoryController();
 const exportController = new ExportController();
 const reportController = new ReportController();
 
@@ -39,6 +45,21 @@ router.patch(
   "/qr/paused",
   validateRequest(setQrPausedSchema, ValidationTarget.BODY),
   controller.setQrPaused,
+);
+
+// Payment history and invoices. Deliberately NOT behind requireActiveSubscription: a
+// company whose plan has lapsed still needs the receipts for what it paid, for its
+// accounts or a PayPal dispute, and least of all should that be held behind renewal.
+// They grant nothing, so there is nothing to paywall.
+router.get(
+  "/payments",
+  validateRequest(listCompanyPaymentsQuerySchema, ValidationTarget.QUERY),
+  paymentHistoryController.listCompanyPayments,
+);
+router.get(
+  "/payments/:paymentId/invoice.pdf",
+  validateRequest(paymentIdParamSchema, ValidationTarget.PARAMS),
+  paymentHistoryController.downloadCompanyInvoice,
 );
 
 // ─────────────────────────────────────────────────────────────────────────────

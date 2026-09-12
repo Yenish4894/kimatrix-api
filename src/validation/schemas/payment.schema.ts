@@ -1,5 +1,6 @@
 import Joi from "joi";
-import { commonPatterns } from "./common.schema";
+import { commonPatterns, paginationSchema } from "./common.schema";
+import { PAYMENT_KINDS, type PaymentKind } from "@/entities/Payment";
 
 /**
  * The two PayPal routes previously had NO validation at all — both controllers did
@@ -82,6 +83,52 @@ export const changePlanSchema = Joi.object({
     "any.required": "Choose the plan you want to move to.",
   }),
 }).required();
+
+// ─── Payment history and invoices ───────────────────────────────────────────
+
+export const paymentIdParamSchema = Joi.object({
+  paymentId: commonPatterns.uuid.required(),
+}).required();
+
+/** Company history: page and limit only. `search` is inherited but unused. */
+export const listCompanyPaymentsQuerySchema = paginationSchema;
+
+const ADMIN_PAYMENT_STATUS_FILTERS = [
+  "captured",
+  "refunded",
+  "pending",
+  "capturing",
+  "failed",
+] as const;
+
+export const listAdminPaymentsQuerySchema = paginationSchema.keys({
+  // No default: the admin ledger shows every row unless asked to narrow it.
+  status: Joi.string()
+    .valid(...ADMIN_PAYMENT_STATUS_FILTERS)
+    .optional(),
+  kind: Joi.string()
+    .valid(...PAYMENT_KINDS)
+    .optional(),
+  from: Joi.date().iso().optional(),
+  to: Joi.date()
+    .iso()
+    .optional()
+    .when("from", { is: Joi.exist(), then: Joi.date().iso().min(Joi.ref("from")) }),
+});
+
+export interface ListAdminPaymentsQueryInput {
+  page: number;
+  limit: number;
+  search?: string;
+  status?: (typeof ADMIN_PAYMENT_STATUS_FILTERS)[number];
+  kind?: PaymentKind;
+  from?: Date;
+  to?: Date;
+}
+
+export const systemStatusQuerySchema = Joi.object({
+  refresh: Joi.boolean().truthy("1").falsy("0").default(false),
+});
 
 export interface SubscribeInput {
   planId: string;

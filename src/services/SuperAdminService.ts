@@ -130,7 +130,11 @@ export class SuperAdminService {
           contactPhone: input.contactPhone,
           whatsappNumber: input.whatsappNumber ?? null,
           businessType: input.businessType,
-          promoEmailOptIn: false,
+          // Opted in: the operator onboarding them is the relationship, and bulk email
+          // (which now skips opted-out companies) is how that operator reaches them. At
+          // false, every admin-created company silently vanished from announcements.
+          // The owner can still opt out from their profile.
+          promoEmailOptIn: true,
           // Accepted by the operator on the customer's behalf, which is the honest
           // record of what happened: nobody clicked a checkbox here.
           termsAcceptedAt: now,
