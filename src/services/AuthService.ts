@@ -5,6 +5,7 @@ import { Company } from "@/entities/Company";
 import { UserRepository } from "@/repositories/UserRepository";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { EmailService } from "@/services/EmailService";
+import { NotificationService } from "@/services/NotificationService";
 import { PasswordService } from "@/services/PasswordService";
 import { SettingsService } from "@/services/SettingsService";
 import { TrialIdentityService } from "@/services/TrialIdentityService";
@@ -119,6 +120,7 @@ export class AuthService {
   private tokenService = new TokenService();
   private tokenRepository = new TokenRepository();
   private emailService = new EmailService();
+  private notificationService = new NotificationService();
 
   async registerCompany(
     input: RegisterCompanyInput,
@@ -513,7 +515,10 @@ export class AuthService {
    * job is to establish that the address is real.
    */
   async confirmEmailVerification(token: string): Promise<{ userId: string; email: string }> {
-    return AppDataSource.transaction(async (manager) => {
+    // Decided inside the transaction, acted on after it commits: the QR email must never
+    // go out for a verification that then rolled back.
+    let qrCompanyId = null as string | null;
+    const result = await AppDataSource.transaction(async (manager) => {
       const tokenHash = this.tokenService.hashToken(token);
       const tokenRow = await this.tokenRepository.findUsableEmailVerificationToken(
         tokenHash,
@@ -546,6 +551,9 @@ export class AuthService {
         // who has already paid.
         if (user.userType === "company") {
           const company = await this.companyRepository.findByOwnerUserId(user.id, manager);
+          // The QR code goes out on first verification whether or not a trial starts:
+          // a company without a trial still needs the code to print once it pays.
+          if (company && company.deactivatedAt == null) qrCompanyId = company.id;
           // Never on a banned company. Starting a trial writes `isActive: true`, which
           // was one of the paths that lifted a ban without an admin. Checked before
           // the identity claim too, so a banned account does not burn the identifiers.
@@ -593,6 +601,10 @@ export class AuthService {
 
       return { userId: user.id, email: user.email };
     });
+
+    // Not awaited, and cannot throw: an email problem must not fail the verification.
+    if (qrCompanyId) void this.notificationService.sendQrCode(qrCompanyId);
+    return result;
   }
 
   async changePassword(userId: string, input: PasswordChangeInput): Promise<void> {
@@ -618,6 +630,7 @@ export class AuthService {
 
   async confirmPasswordReset(input: PasswordResetConfirmInput): Promise<void> {
     const tokenHash = this.tokenService.hashToken(input.token);
+    let qrCompanyId = null as string | null;
 
     await AppDataSource.transaction(async (manager) => {
       const tokenRow = await this.tokenRepository.findUsablePasswordResetToken(tokenHash, manager);
@@ -643,6 +656,12 @@ export class AuthService {
       // apply to a comped account and a step they have already completed.
       if (user.emailVerifiedAt == null) {
         await this.userRepository.markEmailVerified(user.id, manager);
+        // First proof of the mailbox, so the QR code goes out now: this is the
+        // admin-onboarded company's equivalent of clicking the verify link.
+        if (user.userType === "company") {
+          const company = await this.companyRepository.findByOwnerUserId(user.id, manager);
+          if (company && company.deactivatedAt == null) qrCompanyId = company.id;
+        }
       }
 
       await this.tokenRepository.consumePasswordResetToken(tokenRow.id, manager);
@@ -653,6 +672,8 @@ export class AuthService {
         "Password reset confirmed; all sessions revoked",
       );
     });
+
+    if (qrCompanyId) void this.notificationService.sendQrCode(qrCompanyId);
   }
 
   private async findUserByUsernameWithPassword(username: string) {

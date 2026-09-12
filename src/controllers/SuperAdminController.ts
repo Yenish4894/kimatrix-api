@@ -17,6 +17,11 @@ import { AuditService } from "@/services/AuditService";
 import { SystemStatusService } from "@/services/SystemStatusService";
 import { UnauthorizedError } from "@/errors/index";
 import type {
+  ListCustomersQueryInput,
+  ListPurchasesQueryInput,
+} from "@/validation/schemas/company.schema";
+import type {
+  AuditLogQueryInput,
   CreatePlanBody,
   ListCompaniesQueryInput,
   UpdatePlanBody,
@@ -271,6 +276,49 @@ export class SuperAdminController extends BaseController {
         reason,
       );
       return { data: null, message: "Deletion called off. Nothing will be erased." };
+    });
+  };
+
+  // ─── Audit log and per-company drill-down ─────────────────────────────────
+
+  listAuditLog = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const query = req.query as unknown as AuditLogQueryInput;
+      const { items, total } = await this.service.listAuditLog(query);
+      return { data: this.paginationResponse(items, total, query.page, query.limit) };
+    });
+  };
+
+  listCompanyCustomers = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { companyId } = req.params as { companyId: string };
+      const query = req.query as unknown as ListCustomersQueryInput;
+      const { items, total } = await this.service.listCompanyCustomers(companyId, query);
+      return { data: this.paginationResponse(items, total, query.page, query.limit) };
+    });
+  };
+
+  listCompanyPurchases = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { companyId } = req.params as { companyId: string };
+      const query = req.query as unknown as ListPurchasesQueryInput;
+      const { items, total } = await this.service.listCompanyPurchases(companyId, query);
+      return { data: this.paginationResponse(items, total, query.page, query.limit) };
+    });
+  };
+
+  getCompanyDraws = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { companyId } = req.params as { companyId: string };
+      return { data: await this.service.getCompanyDraws(companyId) };
+    });
+  };
+
+  resendInvite = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const { companyId } = req.params as { companyId: string };
+      const result = await this.service.resendInvite(this.actor(req), companyId);
+      return { data: result, message: result.message };
     });
   };
 

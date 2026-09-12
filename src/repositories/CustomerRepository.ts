@@ -157,6 +157,26 @@ export class CustomerRepository {
     };
   }
 
+  /**
+   * Takes a voided purchase back out of the customer's running totals, in one
+   * statement so a concurrent submission cannot interleave. Clamped at zero.
+   */
+  async subtractPurchase(
+    customerId: string,
+    companyId: string,
+    amount: string,
+    manager: EntityManager,
+  ): Promise<void> {
+    await manager.query(
+      `UPDATE "customers"
+          SET "total_invoice_amount" = GREATEST("total_invoice_amount" - $3::numeric, 0),
+              "submission_count"     = GREATEST("submission_count" - 1, 0),
+              "updated_at"           = now()
+        WHERE "id" = $1 AND "company_id" = $2`,
+      [customerId, companyId, amount],
+    );
+  }
+
   async create(data: Partial<Customer>, manager?: EntityManager): Promise<Customer> {
     const repo = this.getRepo(manager);
     return repo.save(repo.create(data));

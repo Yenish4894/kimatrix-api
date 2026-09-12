@@ -46,6 +46,8 @@ describe("company routes", () => {
     "GET /profile",
     "PUT /profile",
     "PATCH /qr/paused",
+    // Killing a leaked code grants nothing either, and must work after a plan lapses.
+    "POST /qr/regenerate",
     "GET /payments",
     "GET /payments/:paymentId/invoice.pdf",
   ]);
@@ -106,9 +108,55 @@ describe("admin routes", () => {
       "GET /system-status",
       "GET /payments",
       "GET /payments/:paymentId/invoice.pdf",
+      "GET /audit-log",
+      "GET /companies/:companyId/customers",
+      "GET /companies/:companyId/purchases",
+      "GET /companies/:companyId/draws",
+      "POST /companies/:companyId/resend-invite",
     ]) {
       assert.ok(keys.has(key), `${key} is missing from admin.route.ts`);
     }
+  });
+
+  it("validates :companyId on every company-scoped route", () => {
+    for (const r of all) {
+      if (!r.key.includes(":companyId")) continue;
+      assert.match(r.args, /companyIdParamSchema/, `${r.key} does not validate :companyId`);
+    }
+  });
+});
+
+describe("company purchase void", () => {
+  const all = routes(source("company.route.ts"));
+  it("is paywalled and validates both the id and the reason", () => {
+    const r = all.find((x) => x.key === "POST /purchases/:purchaseId/void");
+    assert.ok(r, "POST /purchases/:purchaseId/void is missing");
+    assert.match(r.args, /requireActiveSubscription/);
+    assert.match(r.args, /purchaseIdParamSchema/);
+    assert.match(r.args, /voidPurchaseSchema/);
+  });
+});
+
+describe("auth email-change routes", () => {
+  const all = routes(source("auth.route.ts"));
+  const find = (key: string) => {
+    const r = all.find((x) => x.key === key);
+    assert.ok(r, `${key} is missing from auth.route.ts`);
+    return r;
+  };
+
+  it("request needs a session, a rate limit and a validated body", () => {
+    const r = find("POST /email-change/request");
+    assert.match(r.args, /authMiddleware/);
+    assert.match(r.args, /emailChangeRequestLimiter/);
+    assert.match(r.args, /emailChangeRequestSchema/);
+  });
+
+  it("confirm is public but rate-limited and validated", () => {
+    const r = find("POST /email-change/confirm");
+    assert.doesNotMatch(r.args, /authMiddleware/);
+    assert.match(r.args, /emailChangeConfirmLimiter/);
+    assert.match(r.args, /emailChangeConfirmSchema/);
   });
 });
 

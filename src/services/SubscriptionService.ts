@@ -5,6 +5,7 @@ import { Plan } from "@/entities/Plan";
 import { Subscription, type SubscriptionState } from "@/entities/Subscription";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { PaypalService } from "@/services/PaypalService";
+import { NotificationService } from "@/services/NotificationService";
 import { config } from "@/config/index";
 import { BadRequestError, ConflictError, NotFoundError } from "@/errors/index";
 import { computeEntitlement } from "@/utils/entitlement";
@@ -43,6 +44,7 @@ const PAYPAL_STATUS_MAP: Record<string, SubscriptionState> = {
 export class SubscriptionService {
   private paypalService = new PaypalService();
   private companyRepository = new CompanyRepository();
+  private notificationService = new NotificationService();
 
   /**
    * Starts a subscription and returns the PayPal approval URL.
@@ -290,37 +292,45 @@ export class SubscriptionService {
         return null;
       });
 
-    return AppDataSource.transaction(async (manager) => {
-      // Same reasoning as applyRemoteState: FOR UPDATE cannot be combined with a LEFT
-      // JOIN in Postgres, and we only want to lock the subscription row anyway — not
-      // the company and plan rows a join would drag in.
-      const locked = returningRows<{
-        id: string;
-        company_id: string;
-        plan_id: string;
-        trial_ends_at: Date | null;
-      }>(
-        await manager.query(
-          `SELECT s."id", s."company_id", s."plan_id", c."trial_ends_at"
+    // The newly credited payment, or null for an unknown subscription or a replay. Only a
+    // real credit gets a receipt, and only once the credit has committed.
+    const credited = await AppDataSource.transaction(
+      async (
+        manager,
+      ): Promise<{
+        paymentId: string;
+        companyId: string;
+      } | null> => {
+        // Same reasoning as applyRemoteState: FOR UPDATE cannot be combined with a LEFT
+        // JOIN in Postgres, and we only want to lock the subscription row anyway — not
+        // the company and plan rows a join would drag in.
+        const locked = returningRows<{
+          id: string;
+          company_id: string;
+          plan_id: string;
+          trial_ends_at: Date | null;
+        }>(
+          await manager.query(
+            `SELECT s."id", s."company_id", s."plan_id", c."trial_ends_at"
              FROM "subscriptions" s
              JOIN "companies" c ON c."id" = s."company_id"
             WHERE s."paypal_subscription_id" = $1
             FOR UPDATE OF s`,
-          [params.paypalSubscriptionId],
-        ),
-      )[0];
-      if (!locked) {
-        logger.warn({ ...params }, "Cycle payment for an unknown subscription");
-        return false;
-      }
+            [params.paypalSubscriptionId],
+          ),
+        )[0];
+        if (!locked) {
+          logger.warn({ ...params }, "Cycle payment for an unknown subscription");
+          return null;
+        }
 
-      // Candidates: the plan PayPal reports, the stored plan, and the plan of the last
-      // cycle we credited (the pre-change plan, when a change just happened). The sale
-      // amount is the only real evidence of which plan was charged, so a price match
-      // wins; otherwise PayPal's plan, then the stored one.
-      const plan = returningRows<{ id: string; duration_days: number }>(
-        await manager.query(
-          `SELECT p."id", p."duration_days"
+        // Candidates: the plan PayPal reports, the stored plan, and the plan of the last
+        // cycle we credited (the pre-change plan, when a change just happened). The sale
+        // amount is the only real evidence of which plan was charged, so a price match
+        // wins; otherwise PayPal's plan, then the stored one.
+        const plan = returningRows<{ id: string; duration_days: number }>(
+          await manager.query(
+            `SELECT p."id", p."duration_days"
              FROM "plans" p
             WHERE p."id" = $2
                OR ($1::varchar IS NOT NULL AND p."paypal_plan_id" = $1::varchar)
@@ -332,78 +342,84 @@ export class SubscriptionService {
                      (p."id" = $2) DESC,
                      p."created_at" DESC
             LIMIT 1`,
-          [remotePlanId, locked.plan_id, locked.id, params.amount, params.currency],
-        ),
-      )[0];
-      if (!plan) {
-        // Unreachable while plans are never deleted (FK RESTRICT), but a throw here
-        // makes PayPal retry rather than silently dropping a paid cycle.
-        throw new Error(`creditCycle: no plan for subscription ${locked.id}`);
-      }
-      const sub = {
-        id: locked.id,
-        company_id: locked.company_id,
-        plan_id: plan.id,
-        duration_days: plan.duration_days,
-      };
-      // Renewals are charged a day before access ends, and the first charge may land
-      // while a trial is still running. Trial time lives in `trial_ends_at`, not in
-      // `subscription_expires_at`, so floor the stacking point at the trial end or the
-      // converting customer loses the rest of their trial.
-      const trialEnd = locked.trial_ends_at ? new Date(locked.trial_ends_at) : null;
-      const creditFrom = trialEnd && trialEnd > new Date() ? trialEnd : new Date();
+            [remotePlanId, locked.plan_id, locked.id, params.amount, params.currency],
+          ),
+        )[0];
+        if (!plan) {
+          // Unreachable while plans are never deleted (FK RESTRICT), but a throw here
+          // makes PayPal retry rather than silently dropping a paid cycle.
+          throw new Error(`creditCycle: no plan for subscription ${locked.id}`);
+        }
+        const sub = {
+          id: locked.id,
+          company_id: locked.company_id,
+          plan_id: plan.id,
+          duration_days: plan.duration_days,
+        };
+        // Renewals are charged a day before access ends, and the first charge may land
+        // while a trial is still running. Trial time lives in `trial_ends_at`, not in
+        // `subscription_expires_at`, so floor the stacking point at the trial end or the
+        // converting customer loses the rest of their trial.
+        const trialEnd = locked.trial_ends_at ? new Date(locked.trial_ends_at) : null;
+        const creditFrom = trialEnd && trialEnd > new Date() ? trialEnd : new Date();
 
-      const inserted = returningRows<{ id: string }>(
-        await manager.query(
-          `INSERT INTO "payments"
+        const inserted = returningRows<{ id: string }>(
+          await manager.query(
+            `INSERT INTO "payments"
              ("company_id", "plan_id", "subscription_id", "paypal_sale_id",
               "kind", "status", "amount", "currency", "captured_at", "draw_spins")
            VALUES ($1, $2, $3, $4, 'subscription_cycle', 'captured', $5, $6, now(), 0)
            ON CONFLICT ("paypal_sale_id") WHERE "paypal_sale_id" IS NOT NULL DO NOTHING
            RETURNING "id"`,
-          [sub.company_id, sub.plan_id, sub.id, params.saleId, params.amount, params.currency],
-        ),
-      );
-
-      if (inserted.length === 0) {
-        logger.info({ saleId: params.saleId }, "Cycle already credited — ignoring replay");
-        return false;
-      }
-
-      // Extend only after the unique sale insert succeeds. A PayPal webhook replay
-      // must not add a second period before it discovers that the sale was known.
-      const { subscriptionStartsAt, subscriptionEndsAt } =
-        await this.companyRepository.extendSubscription(
-          {
-            companyId: sub.company_id,
-            planId: sub.plan_id,
-            durationDays: sub.duration_days,
-            now: creditFrom,
-          },
-          manager,
+            [sub.company_id, sub.plan_id, sub.id, params.saleId, params.amount, params.currency],
+          ),
         );
-      await manager.query(
-        `UPDATE "payments" SET "subscription_starts_at" = $2, "subscription_ends_at" = $3 WHERE "id" = $1`,
-        [inserted[0]!.id, subscriptionStartsAt, subscriptionEndsAt],
-      );
 
-      await manager.getRepository(Subscription).update(sub.id, {
-        status: "active",
-        currentPeriodEnd: subscriptionEndsAt,
-        // A successful charge clears a past-due state and re-arms the expiry notice,
-        // since the deadline has moved.
-        currentPeriodStart: subscriptionStartsAt,
-      });
-      await manager
-        .getRepository(Company)
-        .update(sub.company_id, { subscriptionEndedNoticeFor: null });
+        if (inserted.length === 0) {
+          logger.info({ saleId: params.saleId }, "Cycle already credited — ignoring replay");
+          return null;
+        }
 
-      logger.info(
-        { companyId: sub.company_id, saleId: params.saleId, until: subscriptionEndsAt },
-        "Subscription cycle credited",
-      );
-      return true;
-    });
+        // Extend only after the unique sale insert succeeds. A PayPal webhook replay
+        // must not add a second period before it discovers that the sale was known.
+        const { subscriptionStartsAt, subscriptionEndsAt } =
+          await this.companyRepository.extendSubscription(
+            {
+              companyId: sub.company_id,
+              planId: sub.plan_id,
+              durationDays: sub.duration_days,
+              now: creditFrom,
+            },
+            manager,
+          );
+        await manager.query(
+          `UPDATE "payments" SET "subscription_starts_at" = $2, "subscription_ends_at" = $3 WHERE "id" = $1`,
+          [inserted[0]!.id, subscriptionStartsAt, subscriptionEndsAt],
+        );
+
+        await manager.getRepository(Subscription).update(sub.id, {
+          status: "active",
+          currentPeriodEnd: subscriptionEndsAt,
+          // A successful charge clears a past-due state and re-arms the expiry notice,
+          // since the deadline has moved.
+          currentPeriodStart: subscriptionStartsAt,
+        });
+        await manager
+          .getRepository(Company)
+          .update(sub.company_id, { subscriptionEndedNoticeFor: null });
+
+        logger.info(
+          { companyId: sub.company_id, saleId: params.saleId, until: subscriptionEndsAt },
+          "Subscription cycle credited",
+        );
+        return { paymentId: inserted[0]!.id, companyId: sub.company_id };
+      },
+    );
+
+    // Never awaited, never throws: the webhook must answer 2xx for a credited cycle even
+    // if the receipt cannot be queued.
+    if (credited) void this.notificationService.sendPaymentReceipt(credited);
+    return credited !== null;
   }
 
   /**

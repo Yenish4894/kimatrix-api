@@ -14,6 +14,7 @@ import {
   exportQuerySchema,
   updateProfileSchema,
   setQrPausedSchema,
+  voidPurchaseSchema,
 } from "@/validation/schemas/company.schema";
 import {
   listCompanyPaymentsQuerySchema,
@@ -46,6 +47,9 @@ router.patch(
   validateRequest(setQrPausedSchema, ValidationTarget.BODY),
   controller.setQrPaused,
 );
+// Kill a leaked code and issue a new one. Outside the paywall for the same reason as
+// pausing: it grants nothing, and a lapsed company must be able to stop a leaked code.
+router.post("/qr/regenerate", controller.regenerateQr);
 
 // Payment history and invoices. Deliberately NOT behind requireActiveSubscription: a
 // company whose plan has lapsed still needs the receipts for what it paid, for its
@@ -145,6 +149,13 @@ router.get(
   requireActiveSubscription,
   validateRequest(purchaseIdParamSchema, ValidationTarget.PARAMS),
   controller.getPurchase,
+);
+router.post(
+  "/purchases/:purchaseId/void",
+  requireActiveSubscription,
+  validateRequest(purchaseIdParamSchema, ValidationTarget.PARAMS),
+  validateRequest(voidPurchaseSchema, ValidationTarget.BODY),
+  controller.voidPurchase,
 );
 
 export default router;

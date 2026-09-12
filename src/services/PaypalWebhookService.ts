@@ -6,6 +6,9 @@ import { PaymentRepository } from "@/repositories/PaymentRepository";
 import { returningRows } from "@/utils/db";
 import { logger } from "@/utils/logger";
 import { classifyReversal, reversalRefs, type ReversalEventType } from "@/utils/paypalBilling";
+import { NotificationService, type RefundNotice } from "@/services/NotificationService";
+import { refundDisplayAmount } from "@/utils/billingEmails";
+import type { RefundAccessChange } from "@/templates/refundProcessed.template";
 
 /**
  * `admin_audit_log.actor_email` is NOT NULL while `actor_user_id` is nullable, so a
@@ -42,6 +45,7 @@ export class PaypalWebhookService {
   private subscriptionService = new SubscriptionService();
   private paypalService = new PaypalService();
   private paymentRepository = new PaymentRepository();
+  private notificationService = new NotificationService();
 
   /**
    * @returns false when the event was a duplicate or is of no interest to us.
@@ -126,6 +130,20 @@ export class PaypalWebhookService {
         return;
       }
 
+      // A recurring charge failed. PayPal keeps the subscription ACTIVE while it
+      // retries, so like PAYMENT.SALE.DENIED this revokes nothing: applyRemoteState marks
+      // it past_due, and the owner is told. Previously this fell through to "not handled".
+      case "BILLING.SUBSCRIPTION.PAYMENT.FAILED": {
+        const id = resource["id"];
+        if (typeof id !== "string") return;
+        const remote = await this.paypalService.getSubscription(id);
+        if (!remote) return;
+        await this.subscriptionService.applyRemoteState(id, remote, createTime ?? undefined);
+        // applyRemoteState has committed. Not awaited; cannot throw.
+        void this.notificationService.sendRenewalFailed(id);
+        return;
+      }
+
       // ── Money actually moving ─────────────────────────────────────────────
       case "PAYMENT.SALE.COMPLETED": {
         const saleId = resource["id"];
@@ -163,6 +181,11 @@ export class PaypalWebhookService {
           remote,
           createTime ?? undefined,
         );
+        // A declined renewal. (A refunded/reversed renewal sale sends nothing: this code
+        // does not take access back for those, so there is no change to report.)
+        if (eventType === "PAYMENT.SALE.DENIED") {
+          void this.notificationService.sendRenewalFailed(billingAgreementId);
+        }
         return;
       }
 
@@ -205,6 +228,8 @@ export class PaypalWebhookService {
       return;
     }
 
+    // Decided inside the transaction, sent after it commits (see the end of this method).
+    let notice = null as RefundNotice | null;
     await AppDataSource.transaction(async (manager) => {
       const payment = await this.paymentRepository.findForReversalForUpdate(refs, manager);
       if (!payment) {
@@ -254,6 +279,14 @@ export class PaypalWebhookService {
           { paymentId: payment.id, companyId: payment.company_id, refund: entry },
           "Partial PayPal refund — payment flagged, access NOT revoked",
         );
+        notice = {
+          paymentId: payment.id,
+          companyId: payment.company_id,
+          extent: "partial",
+          reversalId,
+          ...refundDisplayAmount("partial", resource, payment),
+          access: { type: "none" },
+        };
         return;
       }
 
@@ -328,7 +361,34 @@ export class PaypalWebhookService {
         },
         "PayPal capture reversed — payment marked and access withdrawn",
       );
+
+      // A DENIED capture we never recorded as captured moved no money: nothing to tell.
+      if (wasCaptured) {
+        const change: RefundAccessChange =
+          payment.kind === "spin_addon"
+            ? { type: "spins_removed" }
+            : payment.kind === "order" && access
+              ? {
+                  type: "access_reduced",
+                  newEndsAt: access.after ? new Date(access.after).toISOString() : null,
+                  // Filled in by NotificationService from the invoice row.
+                  spinsRemoved: false,
+                }
+              : { type: "none" };
+        notice = {
+          paymentId: payment.id,
+          companyId: payment.company_id,
+          extent: "full",
+          reversalId,
+          ...refundDisplayAmount("full", resource, payment),
+          access: change,
+        };
+      }
     });
+
+    // After commit. Not awaited and cannot throw: the reversal is recorded whatever
+    // happens to the email, and PayPal must get its 2xx.
+    if (notice) void this.notificationService.sendRefundProcessed(notice);
   }
 
   /**

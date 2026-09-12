@@ -26,6 +26,16 @@ export const AUDIT_ACTIONS = [
   "company.uncomp",
   "company.ban",
   "company.unban",
+  // Re-sending the set-password invite reissues a live credential link.
+  "company.invite_resend",
+  // Actor is the company owner, not an admin: killing a leaked QR code is theirs to do.
+  "company.qr_regenerate",
+  // Actor is the company owner. Removes a purchase from totals, reports and the draw.
+  "purchase.void",
+  // Actor is the account holder. The login identity is what every other safeguard
+  // (reset links, notices) is sent to, so moving it is recorded.
+  "user.email_change_request",
+  "user.email_change",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

@@ -174,6 +174,21 @@ export const passwordResetConfirmLimiter = buildLimiter({
   message: "Too many password reset attempts. Please try again in a minute.",
 });
 
+// Same budget as password reset: each request sends two real emails.
+export const emailChangeRequestLimiter = buildLimiter({
+  prefix: "auth_emailchg_req",
+  windowMs: ONE_MIN,
+  limit: 3,
+  message: "Too many email change requests. Please try again in a minute.",
+});
+
+export const emailChangeConfirmLimiter = buildLimiter({
+  prefix: "auth_emailchg_confirm",
+  windowMs: ONE_MIN,
+  limit: 5,
+  message: "Too many attempts. Please try again in a minute.",
+});
+
 export const qrSubmitPerMinuteLimiter = buildLimiter({
   prefix: "qr_submit_min",
   windowMs: ONE_MIN,
@@ -188,4 +203,15 @@ export const qrSubmitPerDayLimiter = buildLimiter({
   limit: config.QR_SUBMIT_RATE_PER_DAY,
   keyGenerator: (req) => qrSubmitKey(req, "d"),
   message: "You have reached today's submission limit for this number. Please try again tomorrow.",
+});
+
+// The public visitor counter. Unauthenticated, so it is capped per IP (IPv6 by /64) to
+// stop one client inflating the figure. 30 per 10 minutes is far above a real visitor
+// clicking around the site and far below a script.
+export const siteVisitLimiter = buildLimiter({
+  prefix: "metrics_visit",
+  windowMs: ONE_MIN * 10,
+  limit: 30,
+  keyGenerator: (req: Request) => ipKey(req.ip),
+  message: "Too many requests. Please slow down and try again shortly.",
 });

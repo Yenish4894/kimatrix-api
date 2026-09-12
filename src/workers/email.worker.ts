@@ -12,6 +12,13 @@ import { logger } from "@/utils/logger";
 import { EXPIRY_RETENTION_DAYS } from "@/config/retention";
 import { ReportService } from "@/services/ReportService";
 import { hasExhaustedRetries } from "@/workers/retry";
+import { renderQrCodeEmail } from "@/templates/qrCode.template";
+import { renderPaymentReceiptEmail } from "@/templates/paymentReceipt.template";
+import { renderPaymentFailedEmail } from "@/templates/paymentFailed.template";
+import { renderRefundProcessedEmail } from "@/templates/refundProcessed.template";
+import { buildQrCodePdf } from "@/pdf/qrCode";
+import { renderInvoicePdf } from "@/pdf/invoice";
+import { PaymentHistoryService, invoiceFilename } from "@/services/PaymentHistoryService";
 
 let worker: Worker<EmailJobData> | null = null;
 
@@ -140,6 +147,113 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       ...(attachments.length ? { attachments } : {}),
     });
     logger.info({ jobId: job.id, type: data.type, to: data.to }, "Email sent");
+    return;
+  }
+
+  if (data.type === "qrCode") {
+    const rendered = renderQrCodeEmail({
+      companyName: data.companyName,
+      qrUrl: data.qrUrl,
+      qrPageUrl: data.qrPageUrl,
+    });
+    // Built here, not carried in the job: a PDF in job data would sit base64-encoded in
+    // Redis. Unlike the expiry notices' report, the attachment IS this email, so a
+    // failure throws and BullMQ retries rather than sending a QR email with no QR.
+    const pdf = await buildQrCodePdf(data.companyName, data.qrUrl);
+    await mailer.sendMail({
+      from: fromAddress(),
+      to: data.to,
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+      attachments: [{ filename: pdf.filename, content: pdf.body }],
+    });
+    logger.info({ jobId: job.id, type: data.type, companyId: data.companyId }, "Email sent");
+    return;
+  }
+
+  if (data.type === "paymentReceipt") {
+    const invoice = await new PaymentHistoryService().buildInvoiceDataById(data.paymentId);
+    if (!invoice) {
+      // Deleted or never captured. Retrying cannot make it appear.
+      logger.warn({ jobId: job.id, paymentId: data.paymentId }, "Receipt skipped: no invoice row");
+      return;
+    }
+    const rendered = renderPaymentReceiptEmail({
+      companyName: data.companyName,
+      invoiceNumber: invoice.invoiceNumber,
+      kind: invoice.kind,
+      description: invoice.description,
+      amount: invoice.amount,
+      currency: invoice.currency,
+      periodStart: invoice.periodStart,
+      periodEnd: invoice.periodEnd,
+      paidAt: invoice.issuedAt,
+      billingUrl: data.billingUrl,
+    });
+    // The receipt text is the proof of payment; the PDF is a copy of what the billing
+    // page already offers. A render failure is deterministic, so retrying would only
+    // delay the receipt: send without it and say so.
+    const attachments = [];
+    try {
+      attachments.push({
+        filename: invoiceFilename(invoice.invoiceNumber),
+        content: renderInvoicePdf(invoice),
+      });
+    } catch (err) {
+      logger.error(
+        { err, jobId: job.id, paymentId: data.paymentId },
+        "Could not render the invoice PDF; sending the receipt without it",
+      );
+    }
+    await mailer.sendMail({
+      from: fromAddress(),
+      to: data.to,
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+      ...(attachments.length ? { attachments } : {}),
+    });
+    logger.info({ jobId: job.id, type: data.type, paymentId: data.paymentId }, "Email sent");
+    return;
+  }
+
+  if (data.type === "paymentFailed") {
+    const rendered = renderPaymentFailedEmail({
+      companyName: data.companyName,
+      accessUntil: data.accessUntil ? new Date(data.accessUntil) : null,
+      billingUrl: data.billingUrl,
+    });
+    await mailer.sendMail({
+      from: fromAddress(),
+      to: data.to,
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+    });
+    logger.info({ jobId: job.id, type: data.type }, "Email sent");
+    return;
+  }
+
+  if (data.type === "refundProcessed") {
+    const rendered = renderRefundProcessedEmail({
+      companyName: data.companyName,
+      extent: data.extent,
+      amount: data.amount,
+      currency: data.currency,
+      description: data.description,
+      invoiceNumber: data.invoiceNumber,
+      access: data.access,
+      billingUrl: data.billingUrl,
+    });
+    await mailer.sendMail({
+      from: fromAddress(),
+      to: data.to,
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+    });
+    logger.info({ jobId: job.id, type: data.type, paymentId: data.paymentId }, "Email sent");
     return;
   }
 

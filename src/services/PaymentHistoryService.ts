@@ -3,9 +3,15 @@ import type { PaymentKind, PaymentStatus } from "@/entities/Payment";
 import {
   PaymentRepository,
   type AdminPaymentFilters,
+  type InvoicePaymentRow,
   type PaymentHistoryRow,
 } from "@/repositories/PaymentRepository";
-import { invoiceDescription, invoiceNumber, renderInvoicePdf } from "@/pdf/invoice";
+import {
+  invoiceDescription,
+  invoiceNumber,
+  renderInvoicePdf,
+  type InvoiceData,
+} from "@/pdf/invoice";
 
 export interface PaymentHistoryItem {
   id: string;
@@ -106,31 +112,52 @@ export class PaymentHistoryService {
     const row = await this.paymentRepository.findInvoiceRow(paymentId, companyId);
     if (!row) throw NotFoundError("Invoice not found");
 
-    const item = toHistoryItem(row);
-    const number = item.invoiceNumber ?? invoiceNumber(row.id, issueDate(row));
-    const body = renderInvoicePdf({
-      invoiceNumber: number,
-      issuedAt: issueDate(row),
-      status: row.status === "refunded" ? "refunded" : "captured",
-      kind: row.kind,
-      description: item.description,
-      periodStart: row.subscription_starts_at ? new Date(row.subscription_starts_at) : null,
-      periodEnd: row.subscription_ends_at ? new Date(row.subscription_ends_at) : null,
-      drawSpins: item.drawSpins,
-      amount: row.amount,
-      currency: row.currency,
-      paypalReference: item.paypalReference,
-      billTo: {
-        name: row.company_name,
-        registrationNumber: row.registration_number,
-        streetAddress: row.street_address,
-        city: row.city,
-        state: row.state,
-        postalCode: row.postal_code,
-        country: row.country,
-        contactEmail: row.contact_email,
-      },
-    });
-    return { filename: `kimates-invoice-${number}.pdf`, body };
+    const data = toInvoiceData(row);
+    return { filename: invoiceFilename(data.invoiceNumber), body: renderInvoicePdf(data) };
   }
+
+  /**
+   * INTERNAL USE ONLY: no ownership check. For the email worker and NotificationService,
+   * which act on a payment id they got from their own committed transaction. Never call
+   * this with an id from a request; the routes use renderInvoice, which scopes by company.
+   *
+   * Null when the payment is not invoiceable (not captured/refunded, or deleted).
+   */
+  async buildInvoiceDataById(paymentId: string): Promise<InvoiceData | null> {
+    const row = await this.paymentRepository.findInvoiceRow(paymentId, null);
+    return row ? toInvoiceData(row) : null;
+  }
+}
+
+export function invoiceFilename(number: string): string {
+  return `kimates-invoice-${number}.pdf`;
+}
+
+/** The one mapping from a payment row to a printable invoice, shared by download and email. */
+function toInvoiceData(row: InvoicePaymentRow): InvoiceData {
+  const item = toHistoryItem(row);
+  const number = item.invoiceNumber ?? invoiceNumber(row.id, issueDate(row));
+  return {
+    invoiceNumber: number,
+    issuedAt: issueDate(row),
+    status: row.status === "refunded" ? "refunded" : "captured",
+    kind: row.kind,
+    description: item.description,
+    periodStart: row.subscription_starts_at ? new Date(row.subscription_starts_at) : null,
+    periodEnd: row.subscription_ends_at ? new Date(row.subscription_ends_at) : null,
+    drawSpins: item.drawSpins,
+    amount: row.amount,
+    currency: row.currency,
+    paypalReference: item.paypalReference,
+    billTo: {
+      name: row.company_name,
+      registrationNumber: row.registration_number,
+      streetAddress: row.street_address,
+      city: row.city,
+      state: row.state,
+      postalCode: row.postal_code,
+      country: row.country,
+      contactEmail: row.contact_email,
+    },
+  };
 }

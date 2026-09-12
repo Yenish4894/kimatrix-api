@@ -5,6 +5,7 @@ import { LuckyDrawService } from "@/services/LuckyDrawService";
 import { AccountDeletionService } from "@/services/AccountDeletionService";
 import { UnauthorizedError } from "@/errors/index";
 import type {
+  VoidPurchaseInput,
   SetQrPausedInput,
   ListCustomersQueryInput,
   ListPurchasesQueryInput,
@@ -42,6 +43,36 @@ export class CompanyController extends BaseController {
           ? "QR code paused. Customers cannot submit entries until you resume it."
           : "QR code is live again. Customers can submit entries.",
       };
+    });
+  };
+
+  regenerateQr = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const company = req.company;
+      if (!company || !req.user) throw UnauthorizedError("Company context missing");
+      const result = await this.companyService.regenerateQr(company.id, {
+        id: req.user.id,
+        email: req.user.email,
+      });
+      return {
+        data: result,
+        message:
+          "New QR code created. The old code no longer works, so replace any printed copies.",
+      };
+    });
+  };
+
+  voidPurchase = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    await this.handle(req, res, next, async () => {
+      const company = req.company;
+      if (!company || !req.user) throw UnauthorizedError("Company context missing");
+      const purchaseId = req.params["purchaseId"] as string;
+      const { reason } = req.body as VoidPurchaseInput;
+      const purchase = await this.companyService.voidPurchase(company.id, purchaseId, reason, {
+        id: req.user.id,
+        email: req.user.email,
+      });
+      return { data: { purchase }, message: "Purchase voided." };
     });
   };
 

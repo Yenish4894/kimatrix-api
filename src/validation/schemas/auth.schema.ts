@@ -140,6 +140,30 @@ export const passwordChangeSchema = Joi.object({
     .messages({ "any.only": "New passwords do not match." }),
 }).required();
 
+export const emailChangeRequestSchema = Joi.object({
+  newEmail: commonPatterns.email.required(),
+  currentPassword: Joi.string().min(1).max(128).required(),
+}).required();
+
+export interface EmailChangeRequestInput {
+  newEmail: string;
+  currentPassword: string;
+}
+
+export const emailChangeConfirmSchema = Joi.object({
+  token: Joi.string().trim().min(20).max(256).required().messages({
+    "string.base": "This link is invalid or has expired.",
+    "string.empty": "This link is invalid or has expired.",
+    "string.min": "This link is invalid or has expired.",
+    "string.max": "This link is invalid or has expired.",
+    "any.required": "This link is invalid or has expired.",
+  }),
+}).required();
+
+export interface EmailChangeConfirmInput {
+  token: string;
+}
+
 export interface PasswordChangeInput {
   currentPassword: string;
   newPassword: string;

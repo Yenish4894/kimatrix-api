@@ -1,5 +1,35 @@
 import Joi from "joi";
 import { addressFields, commonPatterns, paginationSchema } from "./common.schema";
+import { AUDIT_ACTIONS, type AuditAction } from "@/entities/AdminAuditLog";
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * `to` stays a string when it is a bare date, so the service can include that whole
+ * (UTC) day. A full timestamp is converted to a Date and used as-is, inclusive.
+ */
+export const auditLogQuerySchema = Joi.object({
+  page: commonPatterns.positiveInt.max(10_000).default(1),
+  limit: commonPatterns.positiveInt.max(100).default(20),
+  companyId: commonPatterns.uuid.optional(),
+  action: Joi.string()
+    .valid(...AUDIT_ACTIONS)
+    .optional(),
+  from: Joi.date().iso().optional(),
+  to: Joi.alternatives()
+    .try(Joi.string().pattern(DATE_ONLY), Joi.date().iso())
+    .optional()
+    .messages({ "alternatives.match": "Enter a valid date for 'to'." }),
+});
+
+export interface AuditLogQueryInput {
+  page: number;
+  limit: number;
+  companyId?: string;
+  action?: AuditAction;
+  from?: Date;
+  to?: string | Date;
+}
 
 const COMPANY_STATUS_FILTERS = ["all", "active", "inactive"] as const;
 const BUSINESS_TYPE_FILTERS = ["all", "fuel_station", "shop"] as const;

@@ -1,10 +1,16 @@
-import { Entity, Column, ManyToOne, JoinColumn, Index, Unique, type Relation } from "typeorm";
+import { Entity, Column, ManyToOne, JoinColumn, Index, type Relation } from "typeorm";
 import { BaseEntity } from "./BaseEntity";
 import { Company } from "./Company";
 import { Customer } from "./Customer";
+import { User } from "./User";
 
 @Entity("purchases")
-@Unique("uq_purchases_company_invoice", ["company", "invoiceNumber"])
+// Partial: a voided purchase frees its invoice number so the corrected entry can be
+// re-submitted. See migration 1786939200000.
+@Index("uq_purchases_company_invoice", ["company", "invoiceNumber"], {
+  unique: true,
+  where: `"voided_at" IS NULL`,
+})
 @Index("idx_purchases_customer_submitted", ["customer", "submittedAt"])
 @Index("idx_purchases_company_submitted", ["company", "submittedAt"])
 export class Purchase extends BaseEntity {
@@ -77,4 +83,16 @@ export class Purchase extends BaseEntity {
     nullable: true,
   })
   locationAccuracy!: string | null;
+
+  /** Set when the company voids the entry. Voided rows are kept but count for nothing. */
+  @Column({ name: "voided_at", type: "timestamptz", nullable: true })
+  voidedAt!: Date | null;
+
+  @Column({ name: "void_reason", type: "varchar", length: 500, nullable: true })
+  voidReason!: string | null;
+
+  /** Not loaded by default, so list and detail responses do not carry it. */
+  @ManyToOne(() => User, { nullable: true, onDelete: "SET NULL" })
+  @JoinColumn({ name: "voided_by_user_id" })
+  voidedBy!: Relation<User> | null;
 }

@@ -5,6 +5,8 @@ import { config } from "@/config/index";
 import { SettingsService } from "@/services/SettingsService";
 import { logger } from "@/utils/logger";
 import type { ExpiryNoticeKind } from "@/repositories/CompanyRepository";
+import type { RefundAccessChange } from "@/templates/refundProcessed.template";
+import { emailJobIds } from "@/utils/billingEmails";
 
 export interface SendPasswordResetInput {
   to: string;
@@ -163,4 +165,150 @@ export class EmailService {
       "Subscription notice enqueued",
     );
   }
+
+  /**
+   * Sends an email the caller has already rendered, through the worker's existing
+   * `generic` path, so no new job type or worker branch is needed. Used by the
+   * login-email-change messages (templates/emailChange.template.ts).
+   *
+   * Throws on failure; the caller decides whether that should fail the request.
+   */
+  async enqueueRenderedEmail(input: {
+    to: string;
+    rendered: { subject: string; html: string; text?: string };
+    /** Job id prefix, e.g. "emailchg". No colons (see enqueuePasswordReset). */
+    tag: string;
+  }): Promise<void> {
+    const job = await emailQueue.add(
+      "generic",
+      {
+        type: "generic",
+        to: input.to,
+        subject: input.rendered.subject,
+        html: input.rendered.html,
+        ...(input.rendered.text ? { text: input.rendered.text } : {}),
+      },
+      { jobId: `${encodeSegment(input.tag)}-${encodeSegment(input.to)}-${Date.now()}` },
+    );
+    logger.info({ jobId: job.id, to: input.to, tag: input.tag }, "Rendered email enqueued");
+  }
+
+  // ── Emails that report a committed change: QR code, receipt, failed renewal, refund ──
+  //
+  // Called only through NotificationService, after the caller's transaction commits.
+  // Each job id is deterministic (utils/billingEmails.ts), so BullMQ drops a second add
+  // for the same payment + email type. Completed jobs are kept for 30 days rather than
+  // the queue's 24h/1000 default, so that dedupe window outlasts any PayPal retry
+  // schedule. Log lines carry ids, never the recipient.
+
+  async enqueueQrCodeEmail(input: {
+    to: string;
+    companyId: string;
+    companyName: string;
+    qrUrl: string;
+  }): Promise<void> {
+    const job = await emailQueue.add(
+      "qrCode",
+      {
+        type: "qrCode",
+        to: input.to,
+        companyId: input.companyId,
+        companyName: input.companyName,
+        qrUrl: input.qrUrl,
+        qrPageUrl: `${frontendBase()}/company/qr-code`,
+      },
+      { jobId: emailJobIds.qrCode(input.companyId), removeOnComplete: KEEP_FOR_DEDUPE },
+    );
+    logger.info({ jobId: job.id, companyId: input.companyId }, "QR code email enqueued");
+  }
+
+  async enqueuePaymentReceipt(input: {
+    to: string;
+    paymentId: string;
+    companyName: string;
+  }): Promise<void> {
+    const job = await emailQueue.add(
+      "paymentReceipt",
+      {
+        type: "paymentReceipt",
+        to: input.to,
+        paymentId: input.paymentId,
+        companyName: input.companyName,
+        billingUrl: `${frontendBase()}/company/billing`,
+      },
+      { jobId: emailJobIds.receipt(input.paymentId), removeOnComplete: KEEP_FOR_DEDUPE },
+    );
+    logger.info({ jobId: job.id, paymentId: input.paymentId }, "Payment receipt enqueued");
+  }
+
+  async enqueuePaymentFailed(input: {
+    to: string;
+    subscriptionId: string;
+    companyName: string;
+    accessUntil: Date | null;
+  }): Promise<void> {
+    const job = await emailQueue.add(
+      "paymentFailed",
+      {
+        type: "paymentFailed",
+        to: input.to,
+        companyName: input.companyName,
+        accessUntil: input.accessUntil ? input.accessUntil.toISOString() : null,
+        billingUrl: `${frontendBase()}/company/billing`,
+      },
+      {
+        jobId: emailJobIds.renewalFailed(input.subscriptionId, input.accessUntil),
+        removeOnComplete: KEEP_FOR_DEDUPE,
+      },
+    );
+    logger.info(
+      { jobId: job.id, subscriptionId: input.subscriptionId },
+      "Renewal-failed email enqueued",
+    );
+  }
+
+  async enqueueRefundProcessed(input: {
+    to: string;
+    paymentId: string;
+    extent: "full" | "partial";
+    reversalId: string | null;
+    companyName: string;
+    amount: string | null;
+    currency: string;
+    description: string;
+    invoiceNumber: string | null;
+    access: RefundAccessChange;
+  }): Promise<void> {
+    const job = await emailQueue.add(
+      "refundProcessed",
+      {
+        type: "refundProcessed",
+        to: input.to,
+        paymentId: input.paymentId,
+        companyName: input.companyName,
+        extent: input.extent,
+        amount: input.amount,
+        currency: input.currency,
+        description: input.description,
+        invoiceNumber: input.invoiceNumber,
+        access: input.access,
+        billingUrl: `${frontendBase()}/company/billing`,
+      },
+      {
+        jobId: emailJobIds.refund(input.paymentId, input.extent, input.reversalId),
+        removeOnComplete: KEEP_FOR_DEDUPE,
+      },
+    );
+    logger.info(
+      { jobId: job.id, paymentId: input.paymentId, extent: input.extent },
+      "Refund email enqueued",
+    );
+  }
+}
+
+/** See the note above enqueueQrCodeEmail. */
+const KEEP_FOR_DEDUPE = { age: 30 * 24 * 60 * 60 };
+
+function frontendBase(): string {
+  return config.FRONTEND_BASE_URL.replace(/\/$/, "");
 }

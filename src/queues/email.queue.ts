@@ -1,6 +1,7 @@
 import { Queue } from "bullmq";
 import { redisConfig } from "@/config/redis.config";
 import type { ExpiryNoticeKind } from "@/repositories/CompanyRepository";
+import type { RefundAccessChange } from "@/templates/refundProcessed.template";
 
 export type EmailJobData =
   | {
@@ -37,6 +38,44 @@ export type EmailJobData =
       expiresInHours: number;
       /** ISO string, or null for a complimentary period with no end date. */
       freeUntil: string | null;
+    }
+  | {
+      type: "qrCode";
+      to: string;
+      companyId: string;
+      companyName: string;
+      /** The public URL the code encodes. The PDF is built at send time, not stored here. */
+      qrUrl: string;
+      qrPageUrl: string;
+    }
+  | {
+      type: "paymentReceipt";
+      to: string;
+      /** Everything else (amount, period, the invoice PDF) is read at send time. */
+      paymentId: string;
+      companyName: string;
+      billingUrl: string;
+    }
+  | {
+      type: "paymentFailed";
+      to: string;
+      companyName: string;
+      /** ISO string, or null when the company has no paid end date on record. */
+      accessUntil: string | null;
+      billingUrl: string;
+    }
+  | {
+      type: "refundProcessed";
+      to: string;
+      paymentId: string;
+      companyName: string;
+      extent: "full" | "partial";
+      amount: string | null;
+      currency: string;
+      description: string;
+      invoiceNumber: string | null;
+      access: RefundAccessChange;
+      billingUrl: string;
     }
   | {
       type: "generic";

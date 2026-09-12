@@ -43,6 +43,7 @@ export interface DrawHistoryRow extends Omit<DrawEntry, "customerId"> {
 const ELIGIBLE_WHERE = `
   p."company_id" = $1
   AND p."deleted_at" IS NULL
+  AND p."voided_at" IS NULL
   AND cu."deleted_at" IS NULL
   AND p."submitted_at" >= $2
   AND ($3::timestamptz IS NULL OR p."submitted_at" < $3)

@@ -10,6 +10,7 @@ import { httpLogger } from "@/middleware/httpLogger";
 import { globalApiLimiter } from "@/middleware/rateLimit";
 import { buildAllowedOrigins } from "@/utils/origins";
 import routes from "@/routes/index";
+import metricsRoutes from "@/routes/metrics.route";
 
 const app: Express = express();
 
@@ -78,6 +79,8 @@ app.get("/ready", async (req, res) => {
   });
 });
 
+// Public visit counter (POST) and the super-admin figures (GET). Auth is per route inside.
+app.use("/api/metrics", metricsRoutes);
 app.use("/api", routes);
 
 app.use((_req, res) => {

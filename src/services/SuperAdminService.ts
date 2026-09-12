@@ -24,8 +24,28 @@ import { PasswordService } from "@/services/PasswordService";
 import { TokenService } from "@/services/TokenService";
 import { generateRandomToken } from "@/utils/crypto";
 import { INVITE_TTL_HOURS } from "@/config/onboarding";
-import type { CreateCompanyInput } from "@/validation/schemas/admin.schema";
+import type { AuditLogQueryInput, CreateCompanyInput } from "@/validation/schemas/admin.schema";
+import type {
+  ListCustomersQueryInput,
+  ListPurchasesQueryInput,
+} from "@/validation/schemas/company.schema";
+import type { Customer } from "@/entities/Customer";
+import type { Purchase } from "@/entities/Purchase";
+import { PurchaseRepository } from "@/repositories/PurchaseRepository";
+import { LuckyDrawRepository, type DrawHistoryRow } from "@/repositories/LuckyDrawRepository";
 import { logger } from "@/utils/logger";
+
+export interface AuditLogItem {
+  id: string;
+  createdAt: Date;
+  actorEmail: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  note: string | null;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+}
 
 export interface ListCompaniesInput {
   page: number;
@@ -195,29 +215,8 @@ export class SuperAdminService {
     // Outside the transaction: the company exists and is correct whether or not the
     // mail server is reachable. A failed invite is recoverable from the sign-in page
     // with "Forgot password"; a rolled-back company is not recoverable at all.
-    const rawToken = generateRandomToken(32);
     try {
-      await AppDataSource.transaction(async (manager) => {
-        await this.tokenRepository.invalidateActivePasswordResets(result.user.id, manager);
-        await this.tokenRepository.create(
-          {
-            user: result.user,
-            type: "password_reset",
-            tokenHash: this.tokenService.hashToken(rawToken),
-            expiresAt: new Date(Date.now() + INVITE_TTL_HOURS * 60 * 60 * 1000),
-            ipAddress: null,
-            userAgent: null,
-          },
-          manager,
-        );
-      });
-      await this.emailService.enqueueAccountInvite({
-        to: email,
-        setPasswordToken: rawToken,
-        companyName: result.company.name,
-        expiresInHours: INVITE_TTL_HOURS,
-        freeUntil: compedUntil,
-      });
+      await this.issueInvite(result.user, email, result.company.name, compedUntil);
     } catch (err) {
       logger.error(
         { err, companyId: result.company.id, email },
@@ -230,6 +229,227 @@ export class SuperAdminService {
       "Company onboarded by admin",
     );
     return { companyId: result.company.id, ownerEmail: email, compedUntil };
+  }
+
+  /**
+   * Issues the set-password invite: retires any live reset link, stores a fresh one
+   * (INVITE_TTL_HOURS) and queues the invite email. Throws on failure; each caller
+   * decides whether that fails its request.
+   */
+  private async issueInvite(
+    user: { id: string },
+    email: string,
+    companyName: string,
+    freeUntil: Date | null,
+  ): Promise<void> {
+    const rawToken = generateRandomToken(32);
+    await AppDataSource.transaction(async (manager) => {
+      await this.tokenRepository.invalidateActivePasswordResets(user.id, manager);
+      await this.tokenRepository.create(
+        {
+          user: user as never,
+          type: "password_reset",
+          tokenHash: this.tokenService.hashToken(rawToken),
+          expiresAt: new Date(Date.now() + INVITE_TTL_HOURS * 60 * 60 * 1000),
+          ipAddress: null,
+          userAgent: null,
+        },
+        manager,
+      );
+    });
+    await this.emailService.enqueueAccountInvite({
+      to: email,
+      setPasswordToken: rawToken,
+      companyName,
+      expiresInHours: INVITE_TTL_HOURS,
+      freeUntil,
+    });
+  }
+
+  /**
+   * Re-sends the invite of an admin-onboarded company whose owner never set a password
+   * (the invite expired, or went to spam).
+   *
+   * 409 once the owner's email is verified: setting a password from the invite verifies
+   * it, so the invite has done its job and "Forgot password" is the route from there.
+   * Also 409 for a self-registered company. It never had an invite, and a set-password
+   * link would verify the address through confirmPasswordReset, which does not start the
+   * free trial that verifying through confirmEmailVerification would.
+   */
+  async resendInvite(
+    actor: { id: string; email: string },
+    companyId: string,
+  ): Promise<{ message: string }> {
+    const company = await this.companyRepository.findByIdWithOwner(companyId);
+    if (!company?.owner) throw NotFoundError("Company not found");
+
+    if (company.owner.emailVerifiedAt != null) {
+      throw ConflictError(
+        "The owner has already set up their account, so there is no invite to resend. They can use Forgot password on the sign-in page.",
+      );
+    }
+    const adminCreated = (await AppDataSource.query(
+      `SELECT 1 AS x FROM "admin_audit_log"
+        WHERE "action" = 'company.create' AND "entity_id" = $1
+        LIMIT 1`,
+      [companyId],
+    )) as unknown[];
+    if (adminCreated.length === 0) {
+      throw ConflictError(
+        "This company signed up by itself, so it has no invite to resend. The owner can resend the verification email from their dashboard.",
+      );
+    }
+
+    const ownerEmail = company.owner.email;
+    await this.issueInvite(
+      company.owner,
+      ownerEmail,
+      company.name,
+      company.compedUntil ? new Date(company.compedUntil) : null,
+    );
+
+    await this.auditService.record({
+      actorUserId: actor.id,
+      actorEmail: actor.email,
+      action: "company.invite_resend",
+      entityType: "company",
+      entityId: companyId,
+      after: { ownerEmail },
+    });
+
+    logger.info({ companyId, actorId: actor.id }, "Company invite re-sent by admin");
+    return { message: `Invite re-sent to ${ownerEmail}.` };
+  }
+
+  /**
+   * The audit trail, newest first.
+   *
+   * `companyId` matches rows about the company itself (entity_id = companyId) and rows
+   * about its payments, its purchases (voids) and its owner's login (email changes),
+   * whose entity_id is that row's id rather than the company's.
+   *
+   * `to` as a bare date (YYYY-MM-DD) includes that whole UTC day; as a full timestamp
+   * it is used inclusively as given.
+   */
+  async listAuditLog(q: AuditLogQueryInput): Promise<{ items: AuditLogItem[]; total: number }> {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    const bind = (v: unknown): string => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+
+    if (q.companyId) {
+      // Bound twice: once compared with the varchar entity_id, once with uuid columns,
+      // so Postgres infers each parameter's type cleanly and the uuid indexes are used.
+      const asText = bind(q.companyId);
+      const asUuid = bind(q.companyId);
+      where.push(`(
+          a."entity_id" = ${asText}
+          OR (a."entity_type" = 'payment' AND a."entity_id" IN (
+                SELECT pay."id"::text FROM "payments" pay WHERE pay."company_id" = ${asUuid}))
+          OR (a."entity_type" = 'purchase' AND a."entity_id" IN (
+                SELECT pu."id"::text FROM "purchases" pu WHERE pu."company_id" = ${asUuid}))
+          OR (a."entity_type" = 'user' AND a."entity_id" IN (
+                SELECT co."owner_user_id"::text FROM "companies" co WHERE co."id" = ${asUuid}))
+        )`);
+    }
+    if (q.action) where.push(`a."action" = ${bind(q.action)}`);
+    if (q.from) where.push(`a."created_at" >= ${bind(q.from)}`);
+    if (q.to !== undefined) {
+      if (typeof q.to === "string") {
+        const [y, m, d] = q.to.split("-").map(Number) as [number, number, number];
+        where.push(`a."created_at" < ${bind(new Date(Date.UTC(y, m - 1, d + 1)))}`);
+      } else {
+        where.push(`a."created_at" <= ${bind(q.to)}`);
+      }
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+
+    const [countRow] = (await AppDataSource.query(
+      `SELECT count(*)::int AS total FROM "admin_audit_log" a ${whereSql}`,
+      [...params],
+    )) as { total: number }[];
+
+    const limitParam = bind(q.limit);
+    const offsetParam = bind((q.page - 1) * q.limit);
+    const rows = (await AppDataSource.query(
+      `SELECT a."id", a."created_at", a."actor_email", a."action", a."entity_type",
+              a."entity_id", a."note", a."before", a."after"
+         FROM "admin_audit_log" a
+         ${whereSql}
+        ORDER BY a."created_at" DESC, a."id" DESC
+        LIMIT ${limitParam} OFFSET ${offsetParam}`,
+      params,
+    )) as {
+      id: string;
+      created_at: Date;
+      actor_email: string;
+      action: string;
+      entity_type: string;
+      entity_id: string;
+      note: string | null;
+      before: Record<string, unknown> | null;
+      after: Record<string, unknown> | null;
+    }[];
+
+    return {
+      total: Number(countRow?.total ?? 0),
+      items: rows.map((r) => ({
+        id: r.id,
+        createdAt: r.created_at,
+        actorEmail: r.actor_email,
+        action: r.action,
+        entityType: r.entity_type,
+        entityId: r.entity_id,
+        note: r.note ?? null,
+        before: r.before ?? null,
+        after: r.after ?? null,
+      })),
+    };
+  }
+
+  /** Same repository call and item shape as GET /api/company/customers. */
+  async listCompanyCustomers(
+    companyId: string,
+    q: ListCustomersQueryInput,
+  ): Promise<{ items: Customer[]; total: number }> {
+    await this.getCompany(companyId);
+    return this.customerRepository.listByCompany({
+      companyId,
+      page: q.page,
+      limit: q.limit,
+      ...(q.search !== undefined ? { search: q.search } : {}),
+      ...(q.sortBy !== undefined ? { sortBy: q.sortBy } : {}),
+      ...(q.sortOrder !== undefined ? { sortOrder: q.sortOrder } : {}),
+    });
+  }
+
+  /** Same repository call and item shape as GET /api/company/purchases (voided rows included, flagged). */
+  async listCompanyPurchases(
+    companyId: string,
+    q: ListPurchasesQueryInput,
+  ): Promise<{ items: Purchase[]; total: number }> {
+    await this.getCompany(companyId);
+    return new PurchaseRepository().listByCompany({
+      companyId,
+      page: q.page,
+      limit: q.limit,
+      ...(q.search !== undefined ? { search: q.search } : {}),
+      ...(q.customerId !== undefined ? { customerId: q.customerId } : {}),
+      ...(q.from !== undefined ? { from: q.from } : {}),
+      ...(q.to !== undefined ? { to: q.to } : {}),
+      ...(q.sortBy !== undefined ? { sortBy: q.sortBy } : {}),
+      ...(q.sortOrder !== undefined ? { sortOrder: q.sortOrder } : {}),
+    });
+  }
+
+  /** Same rows as the history in GET /api/company/draws. */
+  async getCompanyDraws(companyId: string): Promise<{ history: DrawHistoryRow[] }> {
+    await this.getCompany(companyId);
+    return {
+      history: await new LuckyDrawRepository().history(companyId, AppDataSource.manager),
+    };
   }
 
   /**

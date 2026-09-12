@@ -1,5 +1,8 @@
+import { AppDataSource } from "data-source";
 import { config } from "@/config/index";
-import { NotFoundError } from "@/errors/index";
+import { ConflictError, NotFoundError } from "@/errors/index";
+import { AuditService } from "@/services/AuditService";
+import { generateRandomToken } from "@/utils/crypto";
 import { logger } from "@/utils/logger";
 import type { Company, SubscriptionStatus } from "@/entities/Company";
 import { computeEntitlement } from "@/utils/entitlement";
@@ -108,6 +111,108 @@ export class CompanyService {
   private companyRepository = new CompanyRepository();
   private customerRepository = new CustomerRepository();
   private purchaseRepository = new PurchaseRepository();
+  private auditService = new AuditService();
+
+  /**
+   * Replaces the company's QR token, so a leaked or misprinted code stops working at
+   * once: resolve and submit both look the company up by token, and the old one now
+   * matches nothing (404).
+   *
+   * Allowed regardless of subscription state, like pausing: it grants nothing.
+   */
+  async regenerateQr(
+    companyId: string,
+    actor: { id: string; email: string },
+  ): Promise<{ qrToken: string; qrUrl: string }> {
+    // Same generator and length as registration and admin onboarding.
+    const qrToken = generateRandomToken(24);
+
+    await AppDataSource.transaction(async (manager) => {
+      const [current] = (await manager.query(
+        `SELECT "qr_token" FROM "companies" WHERE "id" = $1 FOR UPDATE`,
+        [companyId],
+      )) as { qr_token: string }[];
+      if (!current) throw NotFoundError("Company not found");
+
+      await manager.query(
+        `UPDATE "companies" SET "qr_token" = $2, "updated_at" = now() WHERE "id" = $1`,
+        [companyId, qrToken],
+      );
+
+      await this.auditService.record(
+        {
+          actorUserId: actor.id,
+          actorEmail: actor.email,
+          action: "company.qr_regenerate",
+          entityType: "company",
+          entityId: companyId,
+          before: { qrToken: current.qr_token },
+          after: { qrToken },
+        },
+        manager,
+      );
+    });
+
+    logger.info({ companyId }, "QR code regenerated; the previous code no longer resolves");
+    return { qrToken, qrUrl: this.buildQrUrl(qrToken) };
+  }
+
+  /**
+   * Voids one of the company's purchases: the row stays, stamped with who, when and why,
+   * and stops counting everywhere (customer totals, stats, reports, exports, lucky draw).
+   *
+   * One transaction, with the purchase row locked: two clicks cannot both decrement the
+   * customer. Scoped by company in the lookup, so another company's id is a 404.
+   */
+  async voidPurchase(
+    companyId: string,
+    purchaseId: string,
+    reason: string,
+    actor: { id: string; email: string },
+  ): Promise<Purchase> {
+    const trimmed = reason.trim();
+    return AppDataSource.transaction(async (manager) => {
+      const row = await this.purchaseRepository.lockForVoid(purchaseId, companyId, manager);
+      if (!row) throw NotFoundError("Purchase not found");
+      if (row.voided_at != null) throw ConflictError("This purchase has already been voided.");
+
+      await this.purchaseRepository.markVoided(purchaseId, trimmed, actor.id, manager);
+      await this.customerRepository.subtractPurchase(
+        row.customer_id,
+        companyId,
+        row.invoice_amount,
+        manager,
+      );
+
+      await this.auditService.record(
+        {
+          actorUserId: actor.id,
+          actorEmail: actor.email,
+          action: "purchase.void",
+          entityType: "purchase",
+          entityId: purchaseId,
+          before: {
+            companyId,
+            customerId: row.customer_id,
+            invoiceNumber: row.invoice_number,
+            invoiceAmount: row.invoice_amount,
+          },
+          after: { companyId, voided: true },
+          note: trimmed,
+        },
+        manager,
+      );
+
+      const purchase = await this.purchaseRepository.findByIdInCompany(
+        purchaseId,
+        companyId,
+        manager,
+      );
+      if (!purchase) throw NotFoundError("Purchase not found");
+      logger.info({ companyId, purchaseId }, "Purchase voided");
+      return purchase;
+    });
+  }
 
   async updateProfile(
     companyId: string,

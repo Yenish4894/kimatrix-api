@@ -84,7 +84,7 @@ const DATASETS: Record<ExportDataset, DatasetSpec> = {
              p."submitted_at" AS _cursor_ts, p."id" AS _cursor_id`,
     from: `"purchases" p
              INNER JOIN "customers" cu ON cu."id" = p."customer_id"
-           WHERE p."company_id" = $1 AND p."deleted_at" IS NULL`,
+           WHERE p."company_id" = $1 AND p."deleted_at" IS NULL AND p."voided_at" IS NULL`,
     cursorColumn: `p."submitted_at"`,
   },
 };

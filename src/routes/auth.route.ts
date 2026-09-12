@@ -1,7 +1,10 @@
 import { Router } from "express";
 import { AuthController } from "@/controllers/AuthController";
+import { EmailChangeController } from "@/controllers/EmailChangeController";
 import { authMiddleware } from "@/middleware/auth";
 import {
+  emailChangeConfirmLimiter,
+  emailChangeRequestLimiter,
   emailVerificationResendLimiter,
   loginLimiter,
   passwordResetConfirmLimiter,
@@ -10,6 +13,8 @@ import {
 } from "@/middleware/rateLimit";
 import { validateRequest, ValidationTarget } from "@/middleware/validation";
 import {
+  emailChangeConfirmSchema,
+  emailChangeRequestSchema,
   emailVerificationConfirmSchema,
   loginSchema,
   passwordChangeSchema,
@@ -21,6 +26,7 @@ import {
 
 const router = Router();
 const authController = new AuthController();
+const emailChangeController = new EmailChangeController();
 
 router.post(
   "/register/company",
@@ -84,6 +90,24 @@ router.post(
   "/email-verification/confirm",
   validateRequest(emailVerificationConfirmSchema, ValidationTarget.BODY),
   authController.confirmEmailVerification,
+);
+
+// Changing the login email. The request needs a session AND the current password; the
+// confirm is public, because the link is opened from the NEW mailbox, often in a
+// browser with no session.
+router.post(
+  "/email-change/request",
+  authMiddleware,
+  emailChangeRequestLimiter,
+  validateRequest(emailChangeRequestSchema, ValidationTarget.BODY),
+  emailChangeController.requestEmailChange,
+);
+
+router.post(
+  "/email-change/confirm",
+  emailChangeConfirmLimiter,
+  validateRequest(emailChangeConfirmSchema, ValidationTarget.BODY),
+  emailChangeController.confirmEmailChange,
 );
 
 export default router;

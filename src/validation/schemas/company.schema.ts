@@ -133,3 +133,16 @@ export const setQrPausedSchema = Joi.object({
 export interface SetQrPausedInput {
   paused: boolean;
 }
+
+export const voidPurchaseSchema = Joi.object({
+  reason: Joi.string().trim().min(3).max(500).required().messages({
+    "any.required": "Say why this purchase is being voided.",
+    "string.empty": "Say why this purchase is being voided.",
+    "string.min": "Say why this purchase is being voided.",
+    "string.max": "Keep the reason under 500 characters.",
+  }),
+}).required();
+
+export interface VoidPurchaseInput {
+  reason: string;
+}

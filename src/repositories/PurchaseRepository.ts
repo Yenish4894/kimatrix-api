@@ -58,11 +58,60 @@ export class PurchaseRepository {
     invoiceNumber: string,
     manager?: EntityManager,
   ): Promise<Purchase | null> {
-    return this.getRepo(manager)
-      .createQueryBuilder("p")
-      .where("p.company_id = :companyId", { companyId })
-      .andWhere("p.invoice_number = :invoiceNumber", { invoiceNumber })
-      .getOne();
+    return (
+      this.getRepo(manager)
+        .createQueryBuilder("p")
+        .where("p.company_id = :companyId", { companyId })
+        .andWhere("p.invoice_number = :invoiceNumber", { invoiceNumber })
+        // Matches the partial unique index: a voided invoice number may be reused.
+        .andWhere("p.voided_at IS NULL")
+        .getOne()
+    );
+  }
+
+  /**
+   * Locks one of this company's purchases for voiding. Scoped by company in the
+   * WHERE clause, so another company's id finds nothing (404, never 403).
+   */
+  async lockForVoid(
+    purchaseId: string,
+    companyId: string,
+    manager: EntityManager,
+  ): Promise<{
+    id: string;
+    customer_id: string;
+    invoice_number: string;
+    invoice_amount: string;
+    voided_at: Date | null;
+  } | null> {
+    const rows = (await manager.query(
+      `SELECT p."id", p."customer_id", p."invoice_number", p."invoice_amount", p."voided_at"
+         FROM "purchases" p
+        WHERE p."id" = $1 AND p."company_id" = $2 AND p."deleted_at" IS NULL
+        FOR UPDATE`,
+      [purchaseId, companyId],
+    )) as {
+      id: string;
+      customer_id: string;
+      invoice_number: string;
+      invoice_amount: string;
+      voided_at: Date | null;
+    }[];
+    return rows[0] ?? null;
+  }
+
+  async markVoided(
+    purchaseId: string,
+    reason: string,
+    voidedByUserId: string,
+    manager: EntityManager,
+  ): Promise<void> {
+    await manager.query(
+      `UPDATE "purchases"
+          SET "voided_at" = now(), "void_reason" = $2, "voided_by_user_id" = $3, "updated_at" = now()
+        WHERE "id" = $1 AND "voided_at" IS NULL`,
+      [purchaseId, reason, voidedByUserId],
+    );
   }
 
   async listByCompany(
@@ -141,6 +190,7 @@ export class PurchaseRepository {
          FROM "purchases" p
         WHERE p."company_id" = $1
           AND p."deleted_at" IS NULL
+          AND p."voided_at" IS NULL
           AND p."submitted_at" >= $2
           AND p."submitted_at" < $3`,
       [params.companyId, params.from, params.to],
@@ -159,6 +209,7 @@ export class PurchaseRepository {
            JOIN "customers" c ON c."id" = p."customer_id"
           WHERE p."company_id" = $1
             AND p."deleted_at" IS NULL
+            AND p."voided_at" IS NULL
             AND p."submitted_at" >= $2
             AND p."submitted_at" < $3
           GROUP BY p."customer_id"

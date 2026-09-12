@@ -5,6 +5,11 @@ import { validateRequest, ValidationTarget } from "@/middleware/validation";
 import { attachmentUpload } from "@/middleware/attachmentUpload";
 import { parseBulkEmailForm } from "@/middleware/parseBulkEmailForm";
 import {
+  listCustomersQuerySchema,
+  listPurchasesQuerySchema,
+} from "@/validation/schemas/company.schema";
+import {
+  auditLogQuerySchema,
   companyIdParamSchema,
   companyBanSchema,
   createCompanySchema,
@@ -70,6 +75,40 @@ router.post(
   "/companies",
   validateRequest(createCompanySchema, ValidationTarget.BODY),
   controller.createCompany,
+);
+
+// ─── Audit log ────────────────────────────────────────────────
+router.get(
+  "/audit-log",
+  validateRequest(auditLogQuerySchema, ValidationTarget.QUERY),
+  controller.listAuditLog,
+);
+
+// ─── One company's data, read-only (support) ──────────────────
+router.get(
+  "/companies/:companyId/customers",
+  validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  validateRequest(listCustomersQuerySchema, ValidationTarget.QUERY),
+  controller.listCompanyCustomers,
+);
+router.get(
+  "/companies/:companyId/purchases",
+  validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  validateRequest(listPurchasesQuerySchema, ValidationTarget.QUERY),
+  controller.listCompanyPurchases,
+);
+router.get(
+  "/companies/:companyId/draws",
+  validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  controller.getCompanyDraws,
+);
+
+// Re-sends the set-password invite of an admin-onboarded company. 409 once the owner
+// has set up the account, or for a self-registered company.
+router.post(
+  "/companies/:companyId/resend-invite",
+  validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  controller.resendInvite,
 );
 
 router.patch(
