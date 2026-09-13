@@ -18,9 +18,9 @@ import { logger } from "@/utils/logger";
  * every hour means the admin status turns red within the hour even when no customer
  * happens to trigger an email.
  *
- * The recipient is ALWAYS config.SMTP_USER — the authenticated mailbox itself. Never an
- * external address: a canary that bounces off a third party is exactly the kind of
- * failed delivery that gets a mailbox suspended in the first place.
+ * The recipient is always a mailbox we own (see canaryRecipient) — never an external
+ * address: a canary that bounces off a third party is exactly the kind of failed
+ * delivery that gets a sender suspended in the first place.
  *
  * :17 past the hour keeps it off :00 (everything fires) and :05 (subscription cron).
  * Feature-flagged by SMTP_CANARY_ENABLED (on by default in production only).
@@ -41,10 +41,23 @@ let task: ScheduledTask | null = null;
  * Sends one canary. Returns the outcome, or null when skipped (not configured, or
  * another instance holds the lock).
  */
+/**
+ * SMTP_CANARY_TO if set; else SMTP_USER when it is a mailbox (Hostinger logs in as the
+ * mailbox itself); else the From address. Transactional providers (Resend, Brevo, SES)
+ * log in with a non-mailbox user, so SMTP_USER alone is not a usable recipient there.
+ */
+export function canaryRecipient(): string {
+  if (config.SMTP_CANARY_TO) return config.SMTP_CANARY_TO;
+  if (SIMPLE_EMAIL.test(config.SMTP_USER)) return config.SMTP_USER;
+  return config.SMTP_FROM_EMAIL;
+}
+
 export async function sendSmtpCanary(now = new Date()): Promise<SmtpSendOutcome | null> {
-  const to = config.SMTP_USER;
+  const to = canaryRecipient();
   if (!config.SMTP_HOST || !SIMPLE_EMAIL.test(to)) {
-    logger.warn("SMTP canary skipped — SMTP_HOST or a mailbox-style SMTP_USER is not configured");
+    logger.warn(
+      "SMTP canary skipped — set SMTP_HOST and a mailbox for SMTP_CANARY_TO (or SMTP_FROM_EMAIL)",
+    );
     return null;
   }
 

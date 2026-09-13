@@ -81,6 +81,12 @@ export const config = {
   SMTP_PASS: process.env["SMTP_PASS"] ?? "",
   SMTP_FROM_EMAIL: process.env["SMTP_FROM_EMAIL"] ?? "",
   SMTP_FROM_NAME: process.env["SMTP_FROM_NAME"] ?? "KIMates",
+  /**
+   * Where the hourly canary goes. Must be a mailbox we own. Optional: defaults to
+   * SMTP_USER when that is a mailbox (Hostinger), else SMTP_FROM_EMAIL — transactional
+   * providers use a non-mailbox login such as "resend" or an API-key user.
+   */
+  SMTP_CANARY_TO: process.env["SMTP_CANARY_TO"] ?? "",
 
   /**
    * Hourly canary email to SMTP_USER itself (cron/smtpCanary.cron.ts), so a suspended
