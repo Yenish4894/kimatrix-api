@@ -16,6 +16,7 @@ import { logger } from "@/utils/logger";
 import { generateRandomToken } from "@/utils/crypto";
 import { assertEmailsDeliverable } from "@/utils/emailDeliverability";
 import { TokenRepository } from "@/repositories/TokenRepository";
+import { emailDomainForLog } from "@/utils/redact";
 import type {
   LoginInput,
   PasswordChangeInput,
@@ -399,7 +400,19 @@ export class AuthService {
     });
   }
 
-  async logout(refreshToken: string): Promise<void> {
+  /**
+   * @param accessToken The bearer token the request carried, if any. Revoked as well, so
+   *   logging out actually ends the session instead of leaving a 24h access token live.
+   *   A Redis failure here is logged, not thrown: the refresh token is still revoked
+   *   below, so the session cannot be renewed, and the user must still see a logout.
+   */
+  async logout(refreshToken: string, accessToken?: string | null): Promise<void> {
+    if (accessToken) {
+      await this.tokenService.revokeAccessToken(accessToken).catch((err: unknown) => {
+        logger.error({ err }, "Could not revoke the access token on logout");
+      });
+    }
+
     const tokenHash = this.tokenService.hashToken(refreshToken);
     const tokenRow = await this.tokenRepository.findRefreshTokenByHash(tokenHash);
     if (tokenRow && tokenRow.revokedAt === null) {
@@ -413,6 +426,12 @@ export class AuthService {
    * the email exists, to prevent enumeration. If the user exists and is active, prior
    * active reset tokens are invalidated, a fresh token is issued, and the reset email
    * is enqueued via the BullMQ email worker.
+   *
+   * The same TIME too. The response used to wait for the token transaction and the
+   * queue write, but only for a real account — an unknown address returned after one
+   * lookup, so response time told a caller which addresses had accounts even though the
+   * message never did. Both paths now do the same single lookup and return; the
+   * issuing happens after the response, and its failures are logged.
    */
   async requestPasswordReset(
     input: PasswordResetRequestInput,
@@ -422,10 +441,21 @@ export class AuthService {
 
     const user = await this.userRepository.findByEmail(email);
     if (!user || !user.isActive) {
-      logger.info({ email }, "Password reset requested for unknown/inactive email");
+      // The domain only. This is an unauthenticated endpoint, so logging the address
+      // kept a copy of every email anyone typed in, customer or not.
+      logger.info(
+        { emailDomain: emailDomainForLog(email) },
+        "Password reset requested for unknown/inactive email",
+      );
       return;
     }
 
+    void this.issuePasswordReset(user, context).catch((err: unknown) => {
+      logger.error({ err, userId: user.id }, "Failed to issue password reset");
+    });
+  }
+
+  private async issuePasswordReset(user: User, context: LoginContext): Promise<void> {
     const raw = generateRandomToken(32);
     const hash = this.tokenService.hashToken(raw);
     const ttlMs = config.PASSWORD_RESET_TTL_MIN * 60 * 1000;
@@ -702,10 +732,15 @@ export class AuthService {
     ]);
 
     const details = [];
+    // Worded so it does not assert that an account exists. It cannot hide the conflict
+    // altogether: registration signs the new account straight in, so a taken address
+    // has to be refused visibly. What bounds using this as an oracle over our customer
+    // list is registerLimiter (5 an hour per IP) and Turnstile, not the wording.
     if (emailTaken)
       details.push({
         field: "email",
-        message: "This email is already registered. Try logging in instead.",
+        message:
+          "This email can't be used to register. If you already have an account, log in or reset your password.",
       });
     if (usernameTaken)
       details.push({

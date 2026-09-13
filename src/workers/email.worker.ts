@@ -1,6 +1,6 @@
 import { Worker, type Job } from "bullmq";
 import { readFile } from "node:fs/promises";
-import { fromAddress, getMailer } from "@/config/mailer";
+import { fromAddress, sendMail } from "@/config/mailer";
 import { redisConfig } from "@/config/redis.config";
 import { EMAIL_QUEUE_NAME, type EmailJobData } from "@/queues/email.queue";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
@@ -24,14 +24,13 @@ let worker: Worker<EmailJobData> | null = null;
 
 async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
   const data = job.data;
-  const mailer = getMailer();
 
   if (data.type === "passwordReset") {
     const rendered = renderPasswordResetEmail({
       resetUrl: data.resetUrl,
       expiresInMinutes: data.expiresInMinutes,
     });
-    await mailer.sendMail({
+    await sendMail({
       from: fromAddress(),
       to: data.to,
       subject: rendered.subject,
@@ -48,7 +47,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       expiresInMinutes: data.expiresInMinutes,
       trialDurationDays: data.trialDurationDays,
     });
-    await mailer.sendMail({
+    await sendMail({
       from: fromAddress(),
       to: data.to,
       subject: rendered.subject,
@@ -66,7 +65,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       expiresInHours: data.expiresInHours,
       freeUntil: data.freeUntil ? new Date(data.freeUntil) : null,
     });
-    await mailer.sendMail({
+    await sendMail({
       from: fromAddress(),
       to: data.to,
       subject: rendered.subject,
@@ -107,7 +106,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       }
     }
 
-    await mailer.sendMail({
+    await sendMail({
       from: fromAddress(),
       to: data.to,
       subject: rendered.subject,
@@ -138,7 +137,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       }
     }
 
-    await mailer.sendMail({
+    await sendMail({
       from: fromAddress(),
       to: data.to,
       subject: data.subject,
@@ -160,7 +159,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     // Redis. Unlike the expiry notices' report, the attachment IS this email, so a
     // failure throws and BullMQ retries rather than sending a QR email with no QR.
     const pdf = await buildQrCodePdf(data.companyName, data.qrUrl);
-    await mailer.sendMail({
+    await sendMail({
       from: fromAddress(),
       to: data.to,
       subject: rendered.subject,
@@ -206,7 +205,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
         "Could not render the invoice PDF; sending the receipt without it",
       );
     }
-    await mailer.sendMail({
+    await sendMail({
       from: fromAddress(),
       to: data.to,
       subject: rendered.subject,
@@ -224,7 +223,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       accessUntil: data.accessUntil ? new Date(data.accessUntil) : null,
       billingUrl: data.billingUrl,
     });
-    await mailer.sendMail({
+    await sendMail({
       from: fromAddress(),
       to: data.to,
       subject: rendered.subject,
@@ -246,7 +245,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       access: data.access,
       billingUrl: data.billingUrl,
     });
-    await mailer.sendMail({
+    await sendMail({
       from: fromAddress(),
       to: data.to,
       subject: rendered.subject,

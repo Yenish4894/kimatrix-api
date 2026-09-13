@@ -14,6 +14,7 @@ import {
 } from "@/errors/index";
 import { logger } from "@/utils/logger";
 import { computeEntitlement } from "@/utils/entitlement";
+import { INVOICE_ALREADY_SUBMITTED, qrSubmitConflict, submissionLockKeys } from "@/utils/qrSubmit";
 import type { SubmitPurchaseInput } from "@/validation/schemas/qr.schema";
 
 export interface QrResolveResult {
@@ -87,6 +88,20 @@ export class QrService {
     input: SubmitPurchaseInput,
     context: SubmitPurchaseContext,
   ): Promise<SubmitPurchaseResult> {
+    try {
+      return await this.submitInTransaction(qrToken, input, context);
+    } catch (err) {
+      // Backstop to lockSubmission: should a unique index still fire, answer with the
+      // specific reason instead of errorHandler's generic "details already in use".
+      throw qrSubmitConflict(err) ?? err;
+    }
+  }
+
+  private async submitInTransaction(
+    qrToken: string,
+    input: SubmitPurchaseInput,
+    context: SubmitPurchaseContext,
+  ): Promise<SubmitPurchaseResult> {
     return AppDataSource.transaction(async (manager) => {
       const company = await this.companyRepository.findByQrToken(qrToken, manager);
       if (!company) {
@@ -112,6 +127,10 @@ export class QrService {
       const vehicleNumber = input.vehicleNumber?.trim().toUpperCase() ?? null;
       const invoiceNumber = input.invoiceNumber.trim();
 
+      // Before the checks it guards: a concurrent submission with this mobile or invoice
+      // now finishes first, and these checks then see it.
+      await this.lockSubmission(company.id, mobile, invoiceNumber, manager);
+
       await this.assertResubmitCooldown(company.id, mobile, manager);
 
       const invoiceExists = await this.purchaseRepository.findByCompanyAndInvoice(
@@ -120,7 +139,7 @@ export class QrService {
         manager,
       );
       if (invoiceExists) {
-        throw ConflictError("This invoice number has already been submitted");
+        throw ConflictError(INVOICE_ALREADY_SUBMITTED);
       }
 
       const existingCustomer = await this.customerRepository.findByCompanyAndMobile(
@@ -203,6 +222,34 @@ export class QrService {
         submittedAt: purchase.submittedAt,
       };
     });
+  }
+
+  /**
+   * Serialises submissions that could collide — same company and mobile, or same
+   * company and invoice number — for the rest of the transaction.
+   *
+   * The cooldown and duplicate-invoice checks are reads. Two identical submissions
+   * arriving together both passed them before either committed; the loser then hit a
+   * unique index and got a generic 409. Under READ COMMITTED each statement takes a
+   * fresh snapshot, so once the waiter gets the lock its checks see the winner's rows
+   * and it gets the specific cooldown or duplicate-invoice answer.
+   *
+   * Transaction-scoped advisory locks: released on commit or rollback, nothing to
+   * clean up, and no row has to exist yet to lock it (a first-time customer has none).
+   * Different mobiles and invoices never wait on each other.
+   */
+  private async lockSubmission(
+    companyId: string,
+    mobile: string,
+    invoiceNumber: string,
+    manager: EntityManager,
+  ): Promise<void> {
+    for (const [namespace, value] of submissionLockKeys(companyId, mobile, invoiceNumber)) {
+      await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, [
+        namespace,
+        value,
+      ]);
+    }
   }
 
   /**

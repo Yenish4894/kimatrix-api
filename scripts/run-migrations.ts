@@ -1,7 +1,9 @@
 import "reflect-metadata";
-import { AppDataSource } from "data-source";
+import { AppDataSource, withoutStatementTimeout } from "data-source";
 
 async function main(): Promise<void> {
+  // The app's 30s statement cap would abort a long index build or backfill mid-way.
+  withoutStatementTimeout();
   console.log("[migrate] Initializing data source...");
   await AppDataSource.initialize();
 

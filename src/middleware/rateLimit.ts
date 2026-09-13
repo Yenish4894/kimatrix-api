@@ -3,6 +3,7 @@ import rateLimit, { type Options } from "express-rate-limit";
 import RedisStore from "rate-limit-redis";
 import { getRedisClient } from "@/config/redis.client";
 import { config } from "@/config/index";
+import { logger } from "@/utils/logger";
 
 const ONE_MIN = 60 * 1000;
 const ONE_DAY = 24 * 60 * 60 * 1000;
@@ -44,7 +45,9 @@ function buildLimiter(opts: BuildLimiterOptions) {
     // Losing rate limiting for the seconds Redis is unavailable is strictly better
     // than losing the application. The failure is logged by the store's own handler.
     passOnStoreError: true,
-    ...(opts.keyGenerator ? { keyGenerator: opts.keyGenerator } : {}),
+    // Every limiter keys on the client IP unless it says otherwise, through the same
+    // normalisation (IPv6 by /64) and the same trust-proxy guard — see clientIp.
+    keyGenerator: opts.keyGenerator ?? ((req: Request) => ipKey(clientIp(req))),
     ...(opts.skipSuccessfulRequests ? { skipSuccessfulRequests: opts.skipSuccessfulRequests } : {}),
     ...(opts.skip ? { skip: opts.skip } : {}),
     message: {
@@ -70,6 +73,40 @@ function ipKey(ip: string | undefined): string {
   return `${addr.split(":").slice(0, 4).join(":")}::/64`;
 }
 
+const LOOPBACK = /^(127\.|::1$|::ffff:127\.)/;
+let proxyWarningLogged = false;
+
+/**
+ * `req.ip`, with a guard on the one setting every IP-keyed limit depends on.
+ *
+ * Behind nginx, `req.ip` is the client only because app.ts sets `trust proxy` to 1 (one
+ * hop: nginx). If that setting is lost, or another proxy (a CDN) is put in front
+ * without raising the hop count, `req.ip` becomes the proxy's address. Then every
+ * visitor shares ONE bucket: the login limiter locks everybody out after five failures
+ * anywhere, and the QR limits cap the whole platform instead of one device. Nothing
+ * errors; it just silently stops working per client.
+ *
+ * So when a request carries X-Forwarded-For but still resolves to loopback, that is
+ * logged once per process, loudly. The request is not rejected — a misconfigured limit
+ * is a reason to fix the config, not to take the API down.
+ */
+function clientIp(req: Request): string | undefined {
+  const ip = req.ip;
+  if (
+    !proxyWarningLogged &&
+    config.NODE_ENV === "production" &&
+    req.headers["x-forwarded-for"] !== undefined &&
+    (ip === undefined || LOOPBACK.test(ip))
+  ) {
+    proxyWarningLogged = true;
+    logger.error(
+      { trustProxy: req.app?.get("trust proxy") as unknown, ip },
+      "Rate limiting sees the proxy, not the client: X-Forwarded-For is present but req.ip is loopback. Check `trust proxy` in app.ts against the number of proxies in front of the API.",
+    );
+  }
+  return ip;
+}
+
 /**
  * Keyed on IP + token + mobile.
  *
@@ -87,9 +124,22 @@ function ipKey(ip: string | undefined): string {
  * a bare IPv6 address is trivially rotated within a single allocation.
  */
 function qrSubmitKey(req: Request, windowLabel: string): string {
-  const qrToken = req.params["qrToken"] ?? "unknown";
-  const mobile = typeof req.body?.mobile === "string" ? req.body.mobile : "unknown";
-  return `${ipKey(req.ip)}:${qrToken}:${mobile}:${windowLabel}`;
+  return `${ipKey(clientIp(req))}:${qrTokenPart(req)}:${mobilePart(req)}:${windowLabel}`;
+}
+
+/**
+ * The QR limiters now run BEFORE validation (so invalid payloads are counted too), which
+ * means these key parts are unvalidated input. Bounded so a 1 MB "mobile" cannot become
+ * a 1 MB Redis key; the real values are far shorter than either cap.
+ */
+function qrTokenPart(req: Request): string {
+  const token = req.params["qrToken"];
+  return typeof token === "string" && token !== "" ? token.slice(0, 64) : "unknown";
+}
+
+function mobilePart(req: Request): string {
+  const mobile: unknown = req.body?.mobile;
+  return typeof mobile === "string" ? mobile.trim().slice(0, 32) : "unknown";
 }
 
 /**
@@ -101,8 +151,7 @@ export const qrSubmitPerDevicePerDayLimiter = buildLimiter({
   prefix: "qr_submit_device_day",
   windowMs: ONE_DAY,
   limit: 30,
-  keyGenerator: (req: Request) =>
-    `${ipKey(req.ip)}:${req.params["qrToken"] ?? "unknown"}:device_day`,
+  keyGenerator: (req: Request) => `${ipKey(clientIp(req))}:${qrTokenPart(req)}:device_day`,
   message: "Too many submissions from this device today. Please try again tomorrow.",
 });
 
@@ -212,6 +261,6 @@ export const siteVisitLimiter = buildLimiter({
   prefix: "metrics_visit",
   windowMs: ONE_MIN * 10,
   limit: 30,
-  keyGenerator: (req: Request) => ipKey(req.ip),
+  keyGenerator: (req: Request) => ipKey(clientIp(req)),
   message: "Too many requests. Please slow down and try again shortly.",
 });

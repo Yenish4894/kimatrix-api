@@ -24,10 +24,16 @@ export const AUDIT_ACTIONS = [
   // money decisions: who, until when and why must be answerable without reading logs.
   "company.comp",
   "company.uncomp",
+  // A trial is free access too. Two companies were found on admin-granted trials with
+  // no record of who granted them; extending one is now written down like a comp.
+  "company.trial_extend",
   "company.ban",
   "company.unban",
   // Re-sending the set-password invite reissues a live credential link.
   "company.invite_resend",
+  // Handing a burned email/phone back makes it eligible for another free trial.
+  // entity_type 'trial_identity', entity_id = the identity row's id.
+  "trial_identity.release",
   // Actor is the company owner, not an admin: killing a leaked QR code is theirs to do.
   "company.qr_regenerate",
   // Actor is the company owner. Removes a purchase from totals, reports and the draw.
@@ -40,6 +46,9 @@ export const AUDIT_ACTIONS = [
   // the nightly job hard-deleting a signup that never verified its email. Listed so the
   // admin audit-log filter accepts it; nothing else about the row is special.
   "company.unverified_cleanup",
+  // Actor is the system ("system:paypal-webhook"): a recurring sale whose amount or
+  // currency matched no plan, so it was NOT credited. Money moved; an admin decides.
+  "payment.amount_mismatch",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

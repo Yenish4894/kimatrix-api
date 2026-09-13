@@ -25,7 +25,12 @@ import { TokenService } from "@/services/TokenService";
 import { generateRandomToken } from "@/utils/crypto";
 import { assertEmailsDeliverable } from "@/utils/emailDeliverability";
 import { INVITE_TTL_HOURS } from "@/config/onboarding";
-import type { AuditLogQueryInput, CreateCompanyInput } from "@/validation/schemas/admin.schema";
+import {
+  BULK_EMAIL_MAX_RECIPIENTS,
+  type AuditLogQueryInput,
+  type CreateCompanyInput,
+} from "@/validation/schemas/admin.schema";
+import { inviteResendBlock } from "@/utils/inviteResend";
 import type {
   ListCustomersQueryInput,
   ListPurchasesQueryInput,
@@ -47,6 +52,12 @@ export interface AuditLogItem {
   before: Record<string, unknown> | null;
   after: Record<string, unknown> | null;
 }
+
+/** A company as the admin endpoints return it. `createdByAdmin` is a frontend contract. */
+export type AdminCompany = Company & {
+  /** True iff an admin onboarded it (a `company.create` audit row exists). */
+  createdByAdmin: boolean;
+};
 
 export interface ListCompaniesInput {
   page: number;
@@ -77,11 +88,30 @@ export class SuperAdminService {
   private tokenService = new TokenService();
   private emailService = new EmailService();
 
-  async listCompanies(input: ListCompaniesInput): Promise<{ items: Company[]; total: number }> {
-    return this.companyRepository.listForAdmin(input);
+  /**
+   * `createdByAdmin` on every row: the admin UI offers "Resend invite" only for these.
+   * Resolved for the whole page in one query (see CompanyRepository.adminCreatedIds).
+   */
+  async listCompanies(
+    input: ListCompaniesInput,
+  ): Promise<{ items: AdminCompany[]; total: number }> {
+    const { items, total } = await this.companyRepository.listForAdmin(input);
+    const adminCreated = await this.companyRepository.adminCreatedIds(items.map((c) => c.id));
+    return {
+      items: items.map((c) => Object.assign(c, { createdByAdmin: adminCreated.has(c.id) })),
+      total,
+    };
   }
 
-  async getCompany(companyId: string): Promise<Company> {
+  /** The detail endpoint's company, with the same `createdByAdmin` flag as the list. */
+  async getCompany(companyId: string): Promise<AdminCompany> {
+    const company = await this.requireCompany(companyId);
+    const adminCreated = await this.companyRepository.adminCreatedIds([companyId]);
+    return Object.assign(company, { createdByAdmin: adminCreated.has(companyId) });
+  }
+
+  /** Existence check for the other admin actions; skips the flag lookup they don't need. */
+  private async requireCompany(companyId: string): Promise<Company> {
     const company = await this.companyRepository.findByIdWithOwner(companyId);
     if (!company) {
       throw NotFoundError("Company not found");
@@ -278,11 +308,8 @@ export class SuperAdminService {
    * Re-sends the invite of an admin-onboarded company whose owner never set a password
    * (the invite expired, or went to spam).
    *
-   * 409 once the owner's email is verified: setting a password from the invite verifies
-   * it, so the invite has done its job and "Forgot password" is the route from there.
-   * Also 409 for a self-registered company. It never had an invite, and a set-password
-   * link would verify the address through confirmPasswordReset, which does not start the
-   * free trial that verifying through confirmEmailVerification would.
+   * 400 for a self-registered company, 409 once the owner has set up the account. The
+   * rule and its reasons live in utils/inviteResend.ts.
    */
   async resendInvite(
     actor: { id: string; email: string },
@@ -291,21 +318,15 @@ export class SuperAdminService {
     const company = await this.companyRepository.findByIdWithOwner(companyId);
     if (!company?.owner) throw NotFoundError("Company not found");
 
-    if (company.owner.emailVerifiedAt != null) {
-      throw ConflictError(
-        "The owner has already set up their account, so there is no invite to resend. They can use Forgot password on the sign-in page.",
-      );
-    }
-    const adminCreated = (await AppDataSource.query(
-      `SELECT 1 AS x FROM "admin_audit_log"
-        WHERE "action" = 'company.create' AND "entity_id" = $1
-        LIMIT 1`,
-      [companyId],
-    )) as unknown[];
-    if (adminCreated.length === 0) {
-      throw ConflictError(
-        "This company signed up by itself, so it has no invite to resend. The owner can resend the verification email from their dashboard.",
-      );
+    const createdByAdmin = (await this.companyRepository.adminCreatedIds([companyId])).has(
+      companyId,
+    );
+    const block = inviteResendBlock({
+      createdByAdmin,
+      ownerEmailVerified: company.owner.emailVerifiedAt != null,
+    });
+    if (block) {
+      throw block.status === 400 ? BadRequestError(block.message) : ConflictError(block.message);
     }
 
     const ownerEmail = company.owner.email;
@@ -360,6 +381,8 @@ export class SuperAdminService {
                 SELECT pu."id"::text FROM "purchases" pu WHERE pu."company_id" = ${asUuid}))
           OR (a."entity_type" = 'user' AND a."entity_id" IN (
                 SELECT co."owner_user_id"::text FROM "companies" co WHERE co."id" = ${asUuid}))
+          OR (a."entity_type" = 'trial_identity' AND a."entity_id" IN (
+                SELECT ti."id"::text FROM "trial_identities" ti WHERE ti."company_id" = ${asUuid}))
         )`);
     }
     if (q.action) where.push(`a."action" = ${bind(q.action)}`);
@@ -422,7 +445,7 @@ export class SuperAdminService {
     companyId: string,
     q: ListCustomersQueryInput,
   ): Promise<{ items: Customer[]; total: number }> {
-    await this.getCompany(companyId);
+    await this.requireCompany(companyId);
     return this.customerRepository.listByCompany({
       companyId,
       page: q.page,
@@ -438,7 +461,7 @@ export class SuperAdminService {
     companyId: string,
     q: ListPurchasesQueryInput,
   ): Promise<{ items: Purchase[]; total: number }> {
-    await this.getCompany(companyId);
+    await this.requireCompany(companyId);
     return new PurchaseRepository().listByCompany({
       companyId,
       page: q.page,
@@ -454,7 +477,7 @@ export class SuperAdminService {
 
   /** Same rows as the history in GET /api/company/draws. */
   async getCompanyDraws(companyId: string): Promise<{ history: DrawHistoryRow[] }> {
-    await this.getCompany(companyId);
+    await this.requireCompany(companyId);
     return {
       history: await new LuckyDrawRepository().history(companyId, AppDataSource.manager),
     };
@@ -612,13 +635,14 @@ export class SuperAdminService {
   async extendTrial(
     companyId: string,
     days: number,
-    adminUserId: string,
+    actor: { id: string; email: string },
   ): Promise<{
     trialEndsAt: Date;
     status: SubscriptionStatus;
     /** False when the owner never confirmed their email — see the note below. */
     ownerEmailVerified: boolean;
   }> {
+    const adminUserId = actor.id;
     return AppDataSource.transaction(async (manager) => {
       const company = await this.companyRepository.findByIdWithOwner(companyId, manager);
       if (!company) throw NotFoundError("Company not found");
@@ -656,6 +680,32 @@ export class SuperAdminService {
       await this.companyRepository.setEntitlementState(
         companyId,
         { isActive: entitlement.hasAccess, subscriptionStatus: entitlement.status },
+        manager,
+      );
+
+      // In the same transaction as the change, like a comp: free access with no record
+      // of who granted it is exactly what the audit found on two live companies.
+      await this.auditService.record(
+        {
+          actorUserId: actor.id,
+          actorEmail: actor.email,
+          action: "company.trial_extend",
+          entityType: "company",
+          entityId: companyId,
+          before: {
+            trialEndsAt: company.trialEndsAt ? new Date(company.trialEndsAt).toISOString() : null,
+            subscriptionStatus: company.subscriptionStatus,
+          },
+          after: {
+            trialEndsAt: trialEndsAt.toISOString(),
+            subscriptionStatus: entitlement.status,
+            days,
+            ownerEmailVerified,
+          },
+          note: ownerEmailVerified
+            ? null
+            : "Owner has not confirmed their email, so no expiry notices will be sent.",
+        },
         manager,
       );
 
@@ -771,22 +821,46 @@ export class SuperAdminService {
   async releaseTrialIdentity(
     identityId: string,
     reason: string,
-    adminUserId: string,
+    actor: { id: string; email: string },
   ): Promise<void> {
     if (!reason.trim()) {
       throw BadRequestError("Please give a reason for releasing this identifier.");
     }
-    const released = await this.trialIdentityRepository.release(
-      identityId,
-      adminUserId,
-      reason.trim(),
-    );
-    if (!released) {
-      // Either the id is unknown or it was already released. Both mean "nothing to
-      // do", and distinguishing them tells an admin nothing actionable.
-      throw NotFoundError("That identifier was not found, or has already been released.");
-    }
-    logger.info({ identityId, adminUserId }, "Trial identity released by admin");
+    await AppDataSource.transaction(async (manager) => {
+      const released = await this.trialIdentityRepository.release(
+        identityId,
+        actor.id,
+        reason.trim(),
+        manager,
+      );
+      if (!released) {
+        // Either the id is unknown or it was already released. Both mean "nothing to
+        // do", and distinguishing them tells an admin nothing actionable.
+        throw NotFoundError("That identifier was not found, or has already been released.");
+      }
+
+      // Audited because a release re-opens a free trial. The masked preview only — the
+      // registry never stores the identifier itself, and the log must not either.
+      const identity = await this.trialIdentityRepository.findSummary(identityId, manager);
+      await this.auditService.record(
+        {
+          actorUserId: actor.id,
+          actorEmail: actor.email,
+          action: "trial_identity.release",
+          entityType: "trial_identity",
+          entityId: identityId,
+          before: null,
+          after: {
+            identifierType: identity?.identifierType ?? null,
+            preview: identity?.preview ?? null,
+            companyId: identity?.companyId ?? null,
+          },
+          note: reason.trim(),
+        },
+        manager,
+      );
+    });
+    logger.info({ identityId, adminUserId: actor.id }, "Trial identity released by admin");
   }
 
   async getPlatformStats(): Promise<PlatformStatsResult> {
@@ -812,7 +886,7 @@ export class SuperAdminService {
   // anyone should reproduce from memory.
 
   async getDeletionStatus(companyId: string): Promise<DeletionStatus> {
-    await this.getCompany(companyId);
+    await this.requireCompany(companyId);
     return this.accountDeletionService.getStatus(companyId);
   }
 
@@ -836,7 +910,7 @@ export class SuperAdminService {
     if (!reason.trim()) {
       throw BadRequestError("Please record who asked for this deletion and how.");
     }
-    const company = await this.getCompany(companyId);
+    const company = await this.requireCompany(companyId);
 
     const status = await this.accountDeletionService.requestDeletion(companyId, admin.id);
 
@@ -913,6 +987,13 @@ export class SuperAdminService {
           : "No valid recipients found.",
       );
     }
+    // Counted after dedupe, on what would actually be sent. The schema caps each list;
+    // this caps their sum (SEC-7). Every recipient is one job through our only mailbox.
+    if (recipients.length > BULK_EMAIL_MAX_RECIPIENTS) {
+      throw BadRequestError(
+        `A bulk email can go to at most ${BULK_EMAIL_MAX_RECIPIENTS} recipients at a time; this one would reach ${recipients.length}. Split it into smaller sends.`,
+      );
+    }
 
     const emailService = new EmailService();
     const repo = AppDataSource.getRepository(BulkEmailLog);
@@ -983,7 +1064,7 @@ export class SuperAdminService {
     if (!reason.trim()) {
       throw BadRequestError("Please record why this deletion is being called off.");
     }
-    const company = await this.getCompany(companyId);
+    const company = await this.requireCompany(companyId);
     await this.accountDeletionService.cancelDeletion(companyId);
 
     await this.auditService.record({

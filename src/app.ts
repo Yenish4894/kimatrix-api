@@ -43,10 +43,11 @@ app.use(
 // nested-object parsing is attack surface we get nothing for.
 app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 
+// Public and unauthenticated, so it says only "alive". It used to echo NODE_ENV, which
+// tells a stranger whether they have found a staging box with laxer settings.
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
-    environment: config.NODE_ENV,
     timestamp: new Date().toISOString(),
   });
 });
@@ -83,11 +84,13 @@ app.get("/ready", async (req, res) => {
 app.use("/api/metrics", metricsRoutes);
 app.use("/api", routes);
 
-app.use((_req, res) => {
+app.use((req, res) => {
   res.status(404).json({
     success: false,
     message: "Route not found",
     error: "ROUTE_NOT_FOUND",
+    // Same field as every errorHandler response, so a 404 can be traced in the logs too.
+    requestId: req.id,
     timestamp: new Date().toISOString(),
   });
 });

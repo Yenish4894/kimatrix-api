@@ -1,5 +1,7 @@
 import bcrypt from "bcryptjs";
 import { config } from "@/config/index";
+import { BadRequestError } from "@/middleware/errorHandler";
+import { PASSWORD_MAX_BYTES, PASSWORD_TOO_LONG_MESSAGE } from "@/validation/schemas/common.schema";
 
 /**
  * A throwaway hash at the live cost factor, used to burn the same CPU time on a
@@ -9,7 +11,15 @@ import { config } from "@/config/index";
 let decoyHash: Promise<string> | null = null;
 
 export class PasswordService {
+  /**
+   * Refuses more than 72 bytes rather than letting bcrypt truncate silently. The schemas
+   * reject it first with the same message; this is the backstop for any caller that
+   * reaches here without them.
+   */
   async hash(plain: string): Promise<string> {
+    if (Buffer.byteLength(plain, "utf8") > PASSWORD_MAX_BYTES) {
+      throw BadRequestError(PASSWORD_TOO_LONG_MESSAGE);
+    }
     return bcrypt.hash(plain, config.BCRYPT_ROUNDS);
   }
 

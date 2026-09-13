@@ -354,6 +354,13 @@ export interface AdminDeletionInput {
 
 // ─── Bulk email ───────────────────────────────────────────────────────────
 
+/**
+ * Most recipients one bulk email may reach, after dedupe (SEC-7). Each is a job through
+ * our single Hostinger mailbox; a burst far beyond this is how mailboxes get suspended.
+ * The service enforces the total; the schema caps the company list on its own.
+ */
+export const BULK_EMAIL_MAX_RECIPIENTS = 500;
+
 export const sendBulkEmailSchema = Joi.object({
   subject: Joi.string().trim().min(1).max(255).required().messages({
     "any.required": "Subject is required.",
@@ -372,9 +379,14 @@ export const sendBulkEmailSchema = Joi.object({
   // No longer `.min(1)`: a send can now go to typed-in addresses alone, with no
   // company selected at all. The "somebody must receive this" rule moved to the
   // object-level check below, because neither array can enforce it by itself.
-  companyIds: Joi.array().items(commonPatterns.uuid).default([]).messages({
-    "array.base": "Select at least one company.",
-  }),
+  companyIds: Joi.array()
+    .items(commonPatterns.uuid)
+    .max(BULK_EMAIL_MAX_RECIPIENTS)
+    .default([])
+    .messages({
+      "array.base": "Select at least one company.",
+      "array.max": `You can select up to ${BULK_EMAIL_MAX_RECIPIENTS} companies at a time.`,
+    }),
   // Addresses typed in by hand — people who are not registered companies. Capped
   // because this is a comma-separated box, and a paste of a thousand addresses is a
   // mistake far more often than an intention.

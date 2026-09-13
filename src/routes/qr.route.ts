@@ -17,14 +17,17 @@ router.get(
   controller.resolve,
 );
 
+// Limiters BEFORE the validators. With the validators first, a request that failed
+// validation was answered 400 before any limiter counted it, so malformed payloads
+// probed the endpoint (and exercised the validator) at unlimited speed.
 router.post(
   "/:qrToken/submit",
-  validateRequest(qrTokenParamSchema, ValidationTarget.PARAMS),
-  validateRequest(submitPurchaseSchema, ValidationTarget.BODY),
   qrSubmitPerMinuteLimiter,
   qrSubmitPerDayLimiter,
   // No mobile in the key, so rotating the phone number cannot escape it.
   qrSubmitPerDevicePerDayLimiter,
+  validateRequest(qrTokenParamSchema, ValidationTarget.PARAMS),
+  validateRequest(submitPurchaseSchema, ValidationTarget.BODY),
   controller.submit,
 );
 

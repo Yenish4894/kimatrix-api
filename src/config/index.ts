@@ -32,6 +32,11 @@ export const config = {
   // PEM for a provider using a private CA. Certificate validation is always ON when
   // DB_SSL is set; this is how you supply the root when it isn't publicly trusted.
   DB_CA_CERT: process.env["DB_CA_CERT"] ?? "",
+  DB_POOL_MAX: parseInt10(process.env["DB_POOL_MAX"], 10),
+  // Server-side cap on any one statement from the app's pool. A runaway query used to
+  // hold its connection indefinitely, and ten of them starve the pool for everyone.
+  // Migrations run with no cap (scripts/run-migrations.ts); 0 disables it here too.
+  DB_STATEMENT_TIMEOUT_MS: parseInt10(process.env["DB_STATEMENT_TIMEOUT_MS"], 30_000),
 
   JWT_SECRET: process.env["JWT_SECRET"] ?? "",
   JWT_REFRESH_SECRET: process.env["JWT_REFRESH_SECRET"] ?? "",
@@ -77,7 +82,17 @@ export const config = {
   SMTP_FROM_EMAIL: process.env["SMTP_FROM_EMAIL"] ?? "",
   SMTP_FROM_NAME: process.env["SMTP_FROM_NAME"] ?? "KIMates",
 
-  APP_BASE_URL: process.env["APP_BASE_URL"] ?? "http://localhost:5000",
+  /**
+   * Hourly canary email to SMTP_USER itself (cron/smtpCanary.cron.ts), so a suspended
+   * mailbox shows up on the admin status page within the hour even when no customer
+   * email happens to fail. Unset → ON in production, OFF elsewhere; "true"/"false"
+   * override either way.
+   */
+  SMTP_CANARY_ENABLED:
+    (process.env["SMTP_CANARY_ENABLED"] ?? "") === ""
+      ? isProductionEnv
+      : parseBool(process.env["SMTP_CANARY_ENABLED"]),
+
   FRONTEND_BASE_URL: devDefault(process.env["FRONTEND_BASE_URL"], "http://localhost:5173"),
 
   /**

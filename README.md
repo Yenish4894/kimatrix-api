@@ -485,7 +485,6 @@ docker run -d \
 NODE_ENV=production
 DB_SSL=true
 PAYPAL_MODE=live
-APP_BASE_URL=https://kimates.com
 FRONTEND_BASE_URL=https://kimates.com
 ```
 

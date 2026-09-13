@@ -17,8 +17,20 @@ import {
   startUnverifiedCleanupCron,
   stopUnverifiedCleanupCron,
 } from "@/cron/unverifiedCleanup.cron";
+import { startSmtpCanaryCron, stopSmtpCanaryCron } from "@/cron/smtpCanary.cron";
+import { startPaymentReconcileCron, stopPaymentReconcileCron } from "@/cron/paymentReconcile.cron";
+import { waitForRunningCrons } from "@/cron/runTracker";
 import { logger } from "@/utils/logger";
 import { getMailer } from "@/config/mailer";
+
+/**
+ * Shutdown budget. pm2's kill_timeout is 12s: after that it SIGKILLs, so everything
+ * below must finish inside it. The force timer (10s) is the hard stop; running cron
+ * jobs get up to 7s of it to finish the company they are on, which leaves room to close
+ * the worker, the queue, the pool and Redis afterwards.
+ */
+const FORCE_EXIT_MS = 10_000;
+const CRON_DRAIN_MS = 7_000;
 
 async function checkSmtpConnection(): Promise<void> {
   if (!config.SMTP_HOST || !config.SMTP_USER || !config.SMTP_PASS) {
@@ -77,6 +89,8 @@ async function start(): Promise<void> {
   startAccountDeletionCron();
   startExpiredDataPurgeCron();
   startUnverifiedCleanupCron();
+  startSmtpCanaryCron();
+  startPaymentReconcileCron();
 
   const server = app.listen(config.PORT, () => {
     logger.info({ port: config.PORT, env: config.NODE_ENV }, "Server listening");
@@ -91,26 +105,36 @@ async function start(): Promise<void> {
     const forceTimer = setTimeout(() => {
       logger.error("Graceful shutdown timed out — forcing exit");
       process.exit(1);
-    }, 10_000);
+    }, FORCE_EXIT_MS);
     forceTimer.unref();
 
-    // Awaited. Previously this was fire-and-forget, so `closeDatabase()` ran while
-    // requests were still executing — in-flight PayPal captures and QR submissions had
-    // the pool pulled out from under them mid-transaction and lost their writes on every
-    // deploy. server.close() stops accepting new connections immediately and resolves
-    // only once the last in-flight response has been sent; the 10s force timer above
-    // bounds it if a client holds a connection open.
+    // Stop scheduling new cron runs first, so nothing new starts while we drain.
     stopTokenCleanupCron();
     stopSubscriptionStatusCron();
     stopAccountDeletionCron();
     stopExpiredDataPurgeCron();
     stopUnverifiedCleanupCron();
-    await new Promise<void>((resolve) => {
-      server.close(() => {
-        logger.info("HTTP server closed");
-        resolve();
-      });
-    });
+    stopSmtpCanaryCron();
+    stopPaymentReconcileCron();
+
+    // Awaited. Previously this was fire-and-forget, so `closeDatabase()` ran while
+    // requests were still executing — in-flight PayPal captures and QR submissions had
+    // the pool pulled out from under them mid-transaction and lost their writes on every
+    // deploy. server.close() stops accepting new connections immediately and resolves
+    // only once the last in-flight response has been sent.
+    //
+    // A cron job that is mid-run (a purge loop, the hourly reconcile) is waited for in
+    // parallel, bounded by CRON_DRAIN_MS: stopping the schedule does not stop a run
+    // that has already started, and closing the pool under it killed it half-way.
+    await Promise.all([
+      new Promise<void>((resolve) => {
+        server.close(() => {
+          logger.info("HTTP server closed");
+          resolve();
+        });
+      }),
+      waitForRunningCrons(CRON_DRAIN_MS),
+    ]);
     await stopEmailWorker();
     await closeEmailQueue();
     await closeDatabase();
@@ -134,7 +158,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // After an uncaught exception the process state is unknown, so we never carry on.
-// Drain what we can through the normal shutdown (bounded by its 10s force timer), then
+// Drain what we can through the normal shutdown (bounded by its force timer), then
 // exit non-zero so pm2 restarts us. During boot there is nothing to drain yet.
 process.on("uncaughtException", (err) => {
   logger.fatal({ err }, "Uncaught exception — shutting down");

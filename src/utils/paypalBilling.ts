@@ -54,6 +54,45 @@ export function toCents(value: unknown): number | null {
 }
 
 /**
+ * Whether a recurring sale paid exactly the plan's price, in the plan's currency.
+ *
+ * PayPal's sale amount is the only evidence of what was actually charged. A cycle that
+ * paid something else — a plan edited at PayPal, a currency slip, a partial capture —
+ * used to be credited a full period regardless. Compared in cents so "10" and "10.00"
+ * agree; anything unparseable counts as a mismatch.
+ */
+export function saleMatchesPlan(
+  sale: { amount: unknown; currency: unknown },
+  plan: { price: unknown; currency: unknown },
+): boolean {
+  const paid = toCents(sale.amount);
+  const price = toCents(plan.price);
+  if (paid == null || price == null || paid !== price) return false;
+  return (
+    typeof sale.currency === "string" &&
+    typeof plan.currency === "string" &&
+    sale.currency.trim().toUpperCase() === plan.currency.trim().toUpperCase()
+  );
+}
+
+/**
+ * Whether the caller may confirm this subscription.
+ *
+ * Our own row is the authority: it is written with the company id before the buyer is
+ * sent to PayPal, so it exists for every legitimate confirm. PayPal's `custom_id` is
+ * checked as well when it is present, but it can be missing, and ownership used to be
+ * skipped entirely whenever it was.
+ */
+export function subscriptionBelongsTo(
+  localCompanyId: string | null | undefined,
+  remoteCustomId: string | null | undefined,
+  companyId: string,
+): boolean {
+  if (!localCompanyId || localCompanyId !== companyId) return false;
+  return !remoteCustomId || remoteCustomId === companyId;
+}
+
+/**
  * The identifiers a reversal event carries for the capture it reverses.
  *
  * REVERSED and DENIED deliver the capture itself, so `resource.id` is the capture id.

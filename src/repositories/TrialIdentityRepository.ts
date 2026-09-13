@@ -82,6 +82,26 @@ export class TrialIdentityRepository {
     });
   }
 
+  /** What the audit log records about an identity: never the hash, only the masked preview. */
+  async findSummary(
+    id: string,
+    manager?: EntityManager,
+  ): Promise<{ identifierType: string; preview: string; companyId: string | null } | null> {
+    const rows = (await this.getRepo(manager).query(
+      `SELECT "identifier_type", "identifier_preview", "company_id"
+         FROM "trial_identities" WHERE "id" = $1`,
+      [id],
+    )) as { identifier_type: string; identifier_preview: string; company_id: string | null }[];
+    const r = rows[0];
+    return r
+      ? {
+          identifierType: r.identifier_type,
+          preview: r.identifier_preview,
+          companyId: r.company_id,
+        }
+      : null;
+  }
+
   /**
    * Hands an identifier back. The partial unique index is `WHERE released_at IS NULL`,
    * so stamping `released_at` frees the slot without destroying the audit trail —

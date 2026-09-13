@@ -2,6 +2,7 @@ import { config } from "@/config/index";
 import { logger } from "@/utils/logger";
 import { fetchWithTimeout as fetchWithDeadline } from "@/utils/fetchWithTimeout";
 import { AppError, BadRequestError } from "@/errors/index";
+import type { PaypalOrderView } from "@/utils/paymentReconcile";
 
 interface PaypalTokenResponse {
   access_token: string;
@@ -254,6 +255,33 @@ export class PaypalService {
     }
 
     return (await res.json()) as PaypalCaptureResult;
+  }
+
+  /**
+   * PayPal's current view of an order, for reconciling a payment whose capture we never
+   * heard back from. A 404 returns null (PayPal has no such order — retrying will not
+   * change that); anything else that fails throws, and the caller tries again later.
+   */
+  async getOrder(orderId: string): Promise<PaypalOrderView | null> {
+    const token = await this.getAccessToken();
+    const res = await fetchWithTimeout(
+      `${this.baseUrl}/v2/checkout/orders/${encodeURIComponent(orderId)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      const { name, issue, raw } = await parsePaypalError(res);
+      logger.error(
+        { status: res.status, name, issue, body: raw, orderId },
+        "PayPal get-order failed",
+      );
+      throw new AppError(
+        "The payment service is temporarily unavailable. Please try again shortly.",
+        502,
+        PAYMENT_PROVIDER_ERROR,
+      );
+    }
+    return (await res.json()) as PaypalOrderView;
   }
 
   async verifyWebhookSignature(opts: {

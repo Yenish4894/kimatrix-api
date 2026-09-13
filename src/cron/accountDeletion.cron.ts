@@ -1,6 +1,7 @@
 import cron, { type ScheduledTask } from "node-cron";
 import { AppDataSource } from "data-source";
 import { AccountDeletionService, DELETION_GRACE_DAYS } from "@/services/AccountDeletionService";
+import { runExclusive } from "@/cron/runTracker";
 import { logger } from "@/utils/logger";
 
 /**
@@ -16,7 +17,6 @@ const SCHEDULE = "20 3 * * *";
 const ADVISORY_LOCK_KEY = 4711_2027;
 
 let task: ScheduledTask | null = null;
-let running = false;
 
 /**
  * Purges accounts whose 30-day grace period has elapsed.
@@ -25,21 +25,39 @@ let running = false;
  * skipped rather than aborting the batch — one company with unusual data must not
  * indefinitely block erasure for everyone behind it, which is a real obligation and not
  * merely a nicety.
+ *
+ * The lock is held for the WHOLE run. It used to be a transaction-scoped lock taken in
+ * a transaction that committed straight away, so it was released before the loop even
+ * started and two instances could both purge the same list. It is now session-level on
+ * a pinned connection, the same pattern as the expiry purge: lock and unlock through
+ * the pool can land on different connections and leak the lock.
  */
 export async function purgeDueAccounts(): Promise<number> {
   const service = new AccountDeletionService();
 
-  const locked = await AppDataSource.transaction(async (manager) => {
-    const [row] = (await manager.query("SELECT pg_try_advisory_xact_lock($1) AS locked", [
+  const lockRunner = AppDataSource.createQueryRunner();
+  await lockRunner.connect();
+  try {
+    const [{ locked }] = (await lockRunner.query(`SELECT pg_try_advisory_lock($1) AS locked`, [
       ADVISORY_LOCK_KEY,
     ])) as [{ locked: boolean }];
-    return row.locked;
-  });
-  if (!locked) {
-    logger.debug("Account purge skipped — another instance holds the lock");
-    return 0;
+    if (!locked) {
+      logger.debug("Account purge skipped — another instance holds the lock");
+      return 0;
+    }
+    try {
+      return await runPurge(service);
+    } finally {
+      // Same session as the lock, so this can only fail if the connection itself died
+      // — and then Postgres has already dropped the lock with the session.
+      await lockRunner.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]);
+    }
+  } finally {
+    await lockRunner.release();
   }
+}
 
+async function runPurge(service: AccountDeletionService): Promise<number> {
   const due = await service.findDue(new Date());
   if (due.length === 0) return 0;
 
@@ -62,16 +80,10 @@ export function startAccountDeletionCron(): void {
   task = cron.schedule(
     SCHEDULE,
     async () => {
-      if (running) return;
-      running = true;
-      try {
+      await runExclusive("accountDeletion", async () => {
         const purged = await purgeDueAccounts();
         if (purged > 0) logger.warn({ purged }, "Account purge completed");
-      } catch (err) {
-        logger.error({ err }, "Account purge cron failed");
-      } finally {
-        running = false;
-      }
+      });
     },
     { timezone: "UTC" },
   );

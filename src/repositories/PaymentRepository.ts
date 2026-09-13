@@ -2,6 +2,7 @@ import type { EntityManager, Repository } from "typeorm";
 import { AppDataSource } from "data-source";
 import type { PaymentKind, PaymentStatus } from "@/entities/Payment";
 import { Payment } from "@/entities/Payment";
+import { affectedRows } from "@/utils/db";
 
 /** Raw row for reversal handling — snake_case because it comes straight from SQL. */
 export interface ReversalPaymentRow {
@@ -230,6 +231,45 @@ export class PaymentRepository {
       status,
       ...(paypalResponse ? { paypalResponse: paypalResponse as never } : {}),
     });
+  }
+
+  /**
+   * Orders-era payments stuck in `capturing` since before `claimedBefore` — claimed for
+   * capture, then never finalized because the capture call and its webhook were both
+   * lost. `updated_at` is the claim time: the pending→capturing UPDATE stamps it and
+   * nothing touches the row again until it is settled.
+   */
+  async findStuckCapturing(
+    claimedBefore: Date,
+    limit: number,
+  ): Promise<{ id: string; paypal_order_id: string; company_id: string }[]> {
+    return (await AppDataSource.query(
+      `SELECT "id", "paypal_order_id", "company_id"
+         FROM "payments"
+        WHERE "status" = 'capturing'
+          AND "paypal_order_id" IS NOT NULL
+          AND "deleted_at" IS NULL
+          AND "updated_at" < $1
+        ORDER BY "updated_at"
+        LIMIT $2`,
+      [claimedBefore, limit],
+    )) as { id: string; paypal_order_id: string; company_id: string }[];
+  }
+
+  /**
+   * `capturing` → `failed`, only if the row is still `capturing`. Conditional so a
+   * capture or webhook that finalized it meanwhile is never overwritten.
+   *
+   * @returns whether this call made the change.
+   */
+  async failIfCapturing(id: string, paypalResponse: Record<string, unknown>): Promise<boolean> {
+    const result = await AppDataSource.query(
+      `UPDATE "payments"
+          SET "status" = 'failed', "paypal_response" = $2, "updated_at" = now()
+        WHERE "id" = $1 AND "status" = 'capturing'`,
+      [id, JSON.stringify(paypalResponse)],
+    );
+    return affectedRows(result) > 0;
   }
 
   /**

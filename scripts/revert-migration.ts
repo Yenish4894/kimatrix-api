@@ -1,7 +1,9 @@
 import "reflect-metadata";
-import { AppDataSource } from "data-source";
+import { AppDataSource, withoutStatementTimeout } from "data-source";
 
 async function main(): Promise<void> {
+  // Same as run-migrations: a down() can be as heavy as its up().
+  withoutStatementTimeout();
   console.log("[migrate:revert] Initializing data source...");
   await AppDataSource.initialize();
 

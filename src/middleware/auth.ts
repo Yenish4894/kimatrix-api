@@ -9,7 +9,7 @@ const tokenService = new TokenService();
 const userRepository = new UserRepository();
 const companyRepository = new CompanyRepository();
 
-function extractBearerToken(req: Request): string | null {
+export function extractBearerToken(req: Request): string | null {
   const header = req.headers.authorization;
   if (!header || typeof header !== "string") return null;
   const [scheme, token] = header.split(" ");
@@ -29,6 +29,11 @@ export async function authMiddleware(
     }
 
     const payload = tokenService.verifyAccessToken(raw);
+    // Logged out before it expired. Checked before the user lookup: cheaper, and a
+    // revoked token should learn nothing about the account behind it.
+    if (await tokenService.isAccessTokenRevoked(raw)) {
+      throw UnauthorizedError("Session ended. Please log in again.");
+    }
 
     const user = await userRepository.findById(payload.sub);
     if (!user) {
@@ -73,6 +78,10 @@ export async function optionalAuthMiddleware(
       return;
     }
     const payload = tokenService.verifyAccessToken(raw);
+    if (await tokenService.isAccessTokenRevoked(raw)) {
+      next();
+      return;
+    }
     const user = await userRepository.findById(payload.sub);
     if (user && user.isActive) {
       req.user = user;

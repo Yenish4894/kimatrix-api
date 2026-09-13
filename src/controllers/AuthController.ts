@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { BaseController } from "@/controllers/BaseController";
 import { AuthService } from "@/services/AuthService";
+import { extractBearerToken } from "@/middleware/auth";
 import type {
   EmailVerificationConfirmInput,
   LoginInput,
@@ -54,7 +55,9 @@ export class AuthController extends BaseController {
   logout = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       const payload = req.body as RefreshTokenInput;
-      await this.authService.logout(payload.refreshToken);
+      // The route has no auth middleware (logout must work with an expired access
+      // token), so the bearer token is read here, if one was sent, to revoke it too.
+      await this.authService.logout(payload.refreshToken, extractBearerToken(req));
       return { data: null, message: "Logged out" };
     });
   };

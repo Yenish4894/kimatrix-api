@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import type { EntityManager } from "typeorm";
 import { AppDataSource } from "data-source";
 import { BadRequestError } from "@/errors/index";
 import {
@@ -12,6 +12,7 @@ import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { SettingsService } from "@/services/SettingsService";
 import { computeEntitlement } from "@/utils/entitlement";
 import { trialSpinsFor } from "@/utils/spinAddon";
+import { drawSeed } from "@/utils/luckyDraw";
 
 export interface DrawPeriodStatus {
   source: "payment" | "comp" | "trial";
@@ -59,12 +60,18 @@ export class LuckyDrawService {
    * what grants access, otherwise 0. Read on every call, so changing the setting reaches
    * trials already running.
    */
-  private async trialSpins(companyId: string): Promise<number> {
-    const company = await this.companyRepository.findById(companyId);
+  /**
+   * @param manager REQUIRED, the caller's transaction. Reading the company outside it
+   *   (as this used to) took a second pool connection and saw the company as it was
+   *   BEFORE `spin` took its lock — so a spin could be granted against trial state that
+   *   a concurrent change had already ended.
+   */
+  private async trialSpins(companyId: string, manager: EntityManager): Promise<number> {
+    const company = await this.companyRepository.findById(companyId, manager);
     if (!company) return 0;
     return trialSpinsFor(
       computeEntitlement(company, new Date()).isTrial,
-      await this.settingsService.getTrialDrawSpins(),
+      await this.settingsService.getTrialDrawSpins(manager),
     );
   }
 
@@ -74,7 +81,7 @@ export class LuckyDrawService {
         companyId,
         new Date(),
         manager,
-        await this.trialSpins(companyId),
+        await this.trialSpins(companyId, manager),
       );
       const withPools = await Promise.all(
         periods.map(async (p): Promise<DrawPeriodStatus> => {
@@ -105,11 +112,13 @@ export class LuckyDrawService {
       // queues behind the first spin and then sees the spin already spent.
       await this.repository.lockCompany(companyId, manager);
 
+      // After the lock and in this transaction, so the trial state is read as of now.
+      const trialSpins = await this.trialSpins(companyId, manager);
       const periods = await this.repository.activePeriods(
         companyId,
         new Date(),
         manager,
-        await this.trialSpins(companyId),
+        trialSpins,
       );
       // Soonest-ending window first: spins that are about to expire get used before
       // ones that will still be there next week.
@@ -122,24 +131,20 @@ export class LuckyDrawService {
         );
       }
 
-      const pool = await this.repository.countEligible(companyId, period, manager);
+      // Count and pick in ONE statement, so both see the same snapshot. The company lock
+      // does not stop customers submitting or merchants voiding — neither takes it — and
+      // as two statements a void landing between them shifted the pool under the pick.
+      const pick = await this.repository.pickRandomEntry(companyId, period, drawSeed(), manager);
+      const pool = { entries: pick.entries, customers: pick.customers };
       if (pool.entries === 0) {
         throw BadRequestError(
           "There are no eligible purchases in this plan period yet. Spins stay available until the plan ends.",
         );
       }
-
-      // crypto.randomInt, not Math.random: unbiased over the range, and not
-      // predictable from earlier outputs. It is a prize draw; it should be defensible.
-      const offset = randomInt(pool.entries);
-      const winner = await this.repository.pickEntry(companyId, period, offset, manager);
+      const winner = pick.entry;
       if (!winner) {
-        // The company lock does not stop customers submitting — QR submissions never
-        // take it. That is fine for inserts: a new purchase sorts last, beyond every
-        // offset the count allowed, so it cannot shift the pick. Only a purchase being
-        // deleted in this exact instant could empty the slot; fail rather than record
-        // a draw nobody can explain.
-        throw new Error("Lucky draw pool changed between count and pick");
+        // Unreachable: the index is taken modulo the count of the same row set.
+        throw new Error("Lucky draw pick found no entry in a non-empty pool");
       }
 
       const saved = await this.repository.insertDraw(

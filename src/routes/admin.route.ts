@@ -4,6 +4,7 @@ import { superAdminMiddleware } from "@/middleware/auth";
 import { validateRequest, ValidationTarget } from "@/middleware/validation";
 import { attachmentUpload } from "@/middleware/attachmentUpload";
 import { parseBulkEmailForm } from "@/middleware/parseBulkEmailForm";
+import { bulkEmailLimiter } from "@/middleware/bulkEmailLimit";
 import {
   listCustomersQuerySchema,
   listPurchasesQuerySchema,
@@ -103,8 +104,9 @@ router.get(
   controller.getCompanyDraws,
 );
 
-// Re-sends the set-password invite of an admin-onboarded company. 409 once the owner
-// has set up the account, or for a self-registered company.
+// Re-sends the set-password invite of an admin-onboarded company. 400 for a
+// self-registered company (list/detail expose `createdByAdmin` so the UI can hide the
+// button); 409 once the owner has set up the account.
 router.post(
   "/companies/:companyId/resend-invite",
   validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
@@ -225,6 +227,8 @@ router.delete(
 
 router.post(
   "/bulk-email",
+  // First, so a refused send never writes its attachment to disk. Per admin, 5/hour.
+  bulkEmailLimiter,
   // Upload runs BEFORE validation: multer is what parses a multipart body, so without
   // it req.body is empty and every field looks missing.
   attachmentUpload,

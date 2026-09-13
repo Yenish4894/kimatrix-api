@@ -4,6 +4,7 @@ import { EXPIRY_RETENTION_DAYS } from "@/config/retention";
 import { config } from "@/config/index";
 import { ExpiredDataPurgeService } from "@/services/ExpiredDataPurgeService";
 import { logger } from "@/utils/logger";
+import { runExclusive } from "@/cron/runTracker";
 
 /**
  * Erases the collected data of companies that lapsed and never came back.
@@ -21,7 +22,6 @@ const SCHEDULE = "20 3 * * *";
 const ADVISORY_LOCK_KEY = 4_820_117;
 
 let task: ScheduledTask | null = null;
-let running = false;
 
 export async function purgeExpiredCompanyData(): Promise<number> {
   const service = new ExpiredDataPurgeService();
@@ -107,16 +107,10 @@ export function startExpiredDataPurgeCron(): void {
   task = cron.schedule(
     SCHEDULE,
     async () => {
-      if (running) return;
-      running = true;
-      try {
+      await runExclusive("expiredDataPurge", async () => {
         const purged = await purgeExpiredCompanyData();
         if (purged > 0) logger.warn({ purged }, "Expiry purge completed");
-      } catch (err) {
-        logger.error({ err }, "Expiry purge run failed");
-      } finally {
-        running = false;
-      }
+      });
     },
     { timezone: "UTC" },
   );

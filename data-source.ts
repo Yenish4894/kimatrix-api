@@ -25,11 +25,34 @@ export const AppDataSource = new DataSource({
   migrations: isDevelopment ? ["migrations/*.ts"] : ["dist/migrations/*.js"],
   migrationsRun: false,
   extra: {
-    max: 10,
+    max: config.DB_POOL_MAX,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
+    // Sent as startup parameters on every pooled connection. Without them one runaway
+    // query, or a transaction left open by a bug, held its connection indefinitely and
+    // a handful of those starved the whole pool (every request then waits the 5s
+    // connectionTimeout and 500s). Migrations lift both — see withoutStatementTimeout.
+    ...(config.DB_STATEMENT_TIMEOUT_MS > 0
+      ? { statement_timeout: config.DB_STATEMENT_TIMEOUT_MS }
+      : {}),
+    idle_in_transaction_session_timeout: 60_000,
   },
 });
+
+/**
+ * Lifts the app's statement and idle-transaction timeouts. For the migration scripts
+ * only: an index build or a backfill can legitimately take longer than any request
+ * should. Must be called before `initialize()` — the pool reads `extra` when it is built.
+ */
+export function withoutStatementTimeout(): void {
+  AppDataSource.setOptions({
+    extra: {
+      ...(AppDataSource.options.extra as Record<string, unknown>),
+      statement_timeout: 0,
+      idle_in_transaction_session_timeout: 0,
+    },
+  });
+}
 
 export async function initializeDatabase(): Promise<void> {
   if (AppDataSource.isInitialized) return;

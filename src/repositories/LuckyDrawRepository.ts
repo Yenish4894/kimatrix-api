@@ -24,7 +24,7 @@ export interface DrawEntry {
   submittedAt: Date;
 }
 
-export interface DrawHistoryRow extends Omit<DrawEntry, "customerId"> {
+export interface DrawHistoryRow extends Omit<DrawEntry, "customerId" | "purchaseId"> {
   id: string;
   source: "payment" | "comp" | "trial";
   periodStart: Date;
@@ -32,6 +32,23 @@ export interface DrawHistoryRow extends Omit<DrawEntry, "customerId"> {
   entriesCount: number;
   eligibleCustomers: number;
   drawnAt: Date;
+  /** Null once the winning purchase has been erased (expiry purge or account closure). */
+  purchaseId: string | null;
+  /**
+   * True when the winner's customer or purchase row is gone and the details come from
+   * the snapshot taken at draw time: the mobile is then masked to its last four digits.
+   */
+  fromSnapshot: boolean;
+}
+
+/**
+ * What the draw keeps of the winner's mobile once the customer row may be erased: the
+ * last four digits, enough to confirm "yes, that was me" in a prize dispute. Must match
+ * the backfill in migration 1787112000000-luckyDrawSurvivesPurge.
+ */
+export function maskMobile(mobile: string): string {
+  const compact = mobile.replace(/\s+/g, "");
+  return compact.length <= 4 ? "****" : `****${compact.slice(-4)}`;
 }
 
 /**
@@ -50,6 +67,9 @@ const ELIGIBLE_WHERE = `
   AND p."customer_id" NOT IN (
     SELECT d."winner_customer_id" FROM "lucky_draws" d
      WHERE d."company_id" = $1 AND d."period_key" = $4
+       -- Required since winners became nullable (erased customers): one NULL in a
+       -- NOT IN list makes the whole predicate NULL, and nobody would be eligible.
+       AND d."winner_customer_id" IS NOT NULL
   )`;
 
 /**
@@ -171,26 +191,48 @@ export class LuckyDrawRepository {
   }
 
   /**
-   * The purchase at `offset` in a stable ordering of the eligible pool. The caller
-   * supplies a uniformly random offset, so every purchase — and therefore every
-   * customer in proportion to how often they bought — has the same chance.
+   * Counts the eligible pool AND picks the winner in one statement.
+   *
+   * Every purchase — and so every customer, in proportion to how often they bought — has
+   * the same chance: the winner is the row at `seed % entries` in a stable ordering, and
+   * the caller's seed is uniform (see utils/luckyDraw).
+   *
+   * One statement because it is one snapshot. The previous count-then-pick ran as two
+   * statements under READ COMMITTED, each with its own snapshot, so a purchase voided in
+   * between shifted the ordering: the last entry could never win and an offset could
+   * point past the end. The returned counts are the pool the pick was actually made
+   * from, which is what the draw record must state.
    */
-  async pickEntry(
+  async pickRandomEntry(
     companyId: string,
     period: DrawPeriod,
-    offset: number,
+    seed: number,
     manager: EntityManager,
-  ): Promise<DrawEntry | null> {
+  ): Promise<{ entry: DrawEntry | null; entries: number; customers: number }> {
     const [row] = (await manager.query(
-      `SELECT p."id" AS purchase_id, p."customer_id", cu."full_name", cu."mobile",
-              cu."vehicle_number", p."invoice_number", p."invoice_amount", p."submitted_at"
-         FROM "purchases" p JOIN "customers" cu ON cu."id" = p."customer_id"
-        WHERE ${ELIGIBLE_WHERE}
-        ORDER BY p."submitted_at", p."id"
-        OFFSET $5 LIMIT 1`,
-      [companyId, period.periodStart, period.periodEnd, period.periodKey, offset],
+      `WITH pool AS (
+         SELECT p."id" AS purchase_id, p."customer_id", cu."full_name", cu."mobile",
+                cu."vehicle_number", p."invoice_number", p."invoice_amount", p."submitted_at",
+                row_number() OVER (ORDER BY p."submitted_at", p."id") - 1 AS rn
+           FROM "purchases" p JOIN "customers" cu ON cu."id" = p."customer_id"
+          WHERE ${ELIGIBLE_WHERE}
+       ), totals AS (
+         SELECT count(*)::int AS entries, count(DISTINCT customer_id)::int AS customers
+           FROM pool
+       )
+       SELECT t.entries, t.customers, w.*
+         FROM totals t
+         LEFT JOIN pool w
+           ON t.entries > 0 AND w.rn = ($5::bigint % t.entries)`,
+      [companyId, period.periodStart, period.periodEnd, period.periodKey, String(seed)],
     )) as Record<string, unknown>[];
-    if (!row) return null;
+    const entries = Number(row?.["entries"] ?? 0);
+    const customers = Number(row?.["customers"] ?? 0);
+    if (!row || row["purchase_id"] == null) return { entry: null, entries, customers };
+    return { entry: this.toEntry(row), entries, customers };
+  }
+
+  private toEntry(row: Record<string, unknown>): DrawEntry {
     return {
       purchaseId: String(row["purchase_id"]),
       customerId: String(row["customer_id"]),
@@ -214,12 +256,15 @@ export class LuckyDrawRepository {
     },
     manager: EntityManager,
   ): Promise<{ id: string; drawnAt: Date }> {
+    // The snapshot columns are what survive if the customer or purchase is later
+    // erased; see migration 1787112000000-luckyDrawSurvivesPurge.
     const [row] = (await manager.query(
       `INSERT INTO "lucky_draws"
          ("company_id", "period_key", "source", "payment_id", "period_start", "period_end",
           "winner_customer_id", "winning_purchase_id", "entries_count", "eligible_customers",
-          "drawn_by_user_id")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          "drawn_by_user_id", "winner_name", "winner_mobile_masked", "invoice_number",
+          "invoice_amount", "purchase_submitted_at")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING "id", "created_at"`,
       [
         params.companyId,
@@ -233,20 +278,31 @@ export class LuckyDrawRepository {
         params.entriesCount,
         params.eligibleCustomers,
         params.drawnByUserId,
+        params.entry.fullName,
+        maskMobile(params.entry.mobile),
+        params.entry.invoiceNumber,
+        params.entry.invoiceAmount,
+        params.entry.submittedAt,
       ],
     )) as { id: string; created_at: Date }[];
     return { id: row!.id, drawnAt: new Date(row!.created_at) };
   }
 
   async history(companyId: string, manager: EntityManager): Promise<DrawHistoryRow[]> {
+    // LEFT JOINs: a draw whose winner was erased still appears, from its snapshot.
     const rows = (await manager.query(
       `SELECT d."id", d."source", d."period_start", d."period_end", d."entries_count",
-              d."eligible_customers", d."created_at",
-              d."winning_purchase_id", cu."full_name", cu."mobile", cu."vehicle_number",
-              pu."invoice_number", pu."invoice_amount", pu."submitted_at"
+              d."eligible_customers", d."created_at", d."winning_purchase_id",
+              (cu."id" IS NULL OR pu."id" IS NULL) AS from_snapshot,
+              COALESCE(cu."full_name", d."winner_name") AS full_name,
+              COALESCE(cu."mobile", d."winner_mobile_masked") AS mobile,
+              cu."vehicle_number",
+              COALESCE(pu."invoice_number", d."invoice_number") AS invoice_number,
+              COALESCE(pu."invoice_amount", d."invoice_amount") AS invoice_amount,
+              COALESCE(pu."submitted_at", d."purchase_submitted_at", d."created_at") AS submitted_at
          FROM "lucky_draws" d
-         JOIN "customers" cu ON cu."id" = d."winner_customer_id"
-         JOIN "purchases" pu ON pu."id" = d."winning_purchase_id"
+         LEFT JOIN "customers" cu ON cu."id" = d."winner_customer_id"
+         LEFT JOIN "purchases" pu ON pu."id" = d."winning_purchase_id"
         WHERE d."company_id" = $1
         ORDER BY d."created_at" DESC
         LIMIT 50`,
@@ -260,12 +316,14 @@ export class LuckyDrawRepository {
       entriesCount: Number(r["entries_count"]),
       eligibleCustomers: Number(r["eligible_customers"]),
       drawnAt: new Date(r["created_at"] as string),
-      purchaseId: String(r["winning_purchase_id"]),
-      fullName: String(r["full_name"]),
-      mobile: String(r["mobile"]),
+      purchaseId: (r["winning_purchase_id"] as string | null) ?? null,
+      fromSnapshot: Boolean(r["from_snapshot"]),
+      // Null only after an account closure scrubbed the snapshot too.
+      fullName: (r["full_name"] as string | null) ?? "Erased customer",
+      mobile: (r["mobile"] as string | null) ?? "",
       vehicleNumber: (r["vehicle_number"] as string | null) ?? null,
-      invoiceNumber: String(r["invoice_number"]),
-      invoiceAmount: String(r["invoice_amount"]),
+      invoiceNumber: (r["invoice_number"] as string | null) ?? "",
+      invoiceAmount: (r["invoice_amount"] as string | null) ?? "0",
       submittedAt: new Date(r["submitted_at"] as string),
     }));
   }

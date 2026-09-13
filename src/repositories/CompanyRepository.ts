@@ -149,6 +149,24 @@ export class CompanyRepository {
       .getMany();
   }
 
+  /**
+   * Which of these companies an admin created — i.e. have a `company.create` row in
+   * the audit log. One query for a whole page (never one per row), served by
+   * idx_admin_audit_entity (entity_type, entity_id).
+   */
+  async adminCreatedIds(companyIds: string[], manager?: EntityManager): Promise<Set<string>> {
+    if (companyIds.length === 0) return new Set();
+    const rows = (await this.getRepo(manager).query(
+      `SELECT DISTINCT a."entity_id"
+         FROM "admin_audit_log" a
+        WHERE a."entity_type" = 'company'
+          AND a."action" = 'company.create'
+          AND a."entity_id" = ANY ($1::varchar[])`,
+      [companyIds],
+    )) as { entity_id: string }[];
+    return new Set(rows.map((r) => r.entity_id));
+  }
+
   async findByOwnerUserId(ownerUserId: string, manager?: EntityManager): Promise<Company | null> {
     return this.getRepo(manager)
       .createQueryBuilder("c")

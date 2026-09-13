@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { unlink } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import multer from "multer";
@@ -7,6 +7,7 @@ import type { NextFunction, Request, Response } from "express";
 import {
   ATTACHMENT_DIR,
   ATTACHMENT_MAX_BYTES,
+  contentMatchesExtension,
   formatBytes,
   isAllowedAttachment,
 } from "@/config/uploads";
@@ -35,7 +36,11 @@ const upload = multer({
   },
   fileFilter: (_req, file, cb) => {
     if (!isAllowedAttachment(file.originalname)) {
-      cb(BadRequestError("That file type can't be attached. Use a PDF, image, or document."));
+      cb(
+        BadRequestError(
+          "That file type can't be attached. Use a PDF, image, CSV, text, .docx or .xlsx file.",
+        ),
+      );
       return;
     }
     cb(null, true);
@@ -52,8 +57,9 @@ const upload = multer({
 export function attachmentUpload(req: Request, res: Response, next: NextFunction): void {
   upload(req, res, (err: unknown) => {
     if (!err) {
+      // Registered first, so a file refused by the content check below is deleted too.
       discardOnFailure(req, res);
-      next();
+      void verifyContent(req).then(next, next);
       return;
     }
     if (err instanceof multer.MulterError) {
@@ -72,6 +78,24 @@ export function attachmentUpload(req: Request, res: Response, next: NextFunction
     }
     next(err);
   });
+}
+
+/**
+ * Refuses a file whose bytes are not what its extension says.
+ *
+ * The multer `fileFilter` only sees the name (the body has not arrived yet), so the
+ * content can only be checked once the file is on disk. Reading all of it is bounded by
+ * the 10 MB limit, and the .docx/.xlsx macro check needs the zip directory at the end.
+ */
+async function verifyContent(req: Request): Promise<void> {
+  const file = (req as Request & { file?: Express.Multer.File }).file;
+  if (!file) return;
+  const bytes = await readFile(file.path);
+  if (!contentMatchesExtension(file.originalname, bytes)) {
+    throw BadRequestError(
+      "That file's contents don't match its type, so it can't be attached. Export it again as a real PDF, image, CSV, text, .docx or .xlsx file.",
+    );
+  }
 }
 
 /**

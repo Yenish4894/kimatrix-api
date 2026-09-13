@@ -1,6 +1,7 @@
 import cron, { type ScheduledTask } from "node-cron";
 import { AppDataSource } from "data-source";
 import { logger } from "@/utils/logger";
+import { runExclusive } from "@/cron/runTracker";
 import { affectedRows } from "@/utils/db";
 import { CompanyRepository, EXPIRY_NOTICE_KINDS } from "@/repositories/CompanyRepository";
 import { EmailService } from "@/services/EmailService";
@@ -72,7 +73,6 @@ UPDATE "companies" c
 `;
 
 let task: ScheduledTask | null = null;
-let running = false;
 
 export async function reconcileSubscriptionStatuses(): Promise<number> {
   return AppDataSource.transaction(async (manager) => {
@@ -165,10 +165,8 @@ export function startSubscriptionStatusCron(): void {
     SCHEDULE,
     async () => {
       // A previous tick still running means the table is large enough that overlapping
-      // runs would queue behind each other's locks for no benefit.
-      if (running) return;
-      running = true;
-      try {
+      // runs would queue behind each other's locks for no benefit; runExclusive skips.
+      await runExclusive("subscriptionStatus", async () => {
         const changed = await reconcileSubscriptionStatuses();
         if (changed > 0) {
           logger.info({ changed }, "Subscription status reconcile completed");
@@ -181,11 +179,7 @@ export function startSubscriptionStatusCron(): void {
         if (notices > 0) {
           logger.info({ notices }, "Expiry notices enqueued");
         }
-      } catch (err) {
-        logger.error({ err }, "Subscription status reconcile failed");
-      } finally {
-        running = false;
-      }
+      });
     },
     { timezone: "UTC" },
   );

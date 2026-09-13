@@ -3,6 +3,7 @@ import { AppDataSource } from "data-source";
 import { Company } from "@/entities/Company";
 import { SubscriptionService } from "@/services/SubscriptionService";
 import { TokenRepository } from "@/repositories/TokenRepository";
+import { eraseCompanyCustomerData } from "@/services/customerDataErasure";
 import { BadRequestError, NotFoundError } from "@/errors/index";
 import { returningRows } from "@/utils/db";
 import { logger } from "@/utils/logger";
@@ -130,13 +131,11 @@ export class AccountDeletionService {
         return { companyId, purchasesDeleted: 0, customersDeleted: 0 };
       }
 
-      // Third-party personal data. Purchases first: they reference customers RESTRICT.
-      const purchases = await manager.query(`DELETE FROM "purchases" WHERE "company_id" = $1`, [
-        companyId,
-      ]);
-      const customers = await manager.query(`DELETE FROM "customers" WHERE "company_id" = $1`, [
-        companyId,
-      ]);
+      // Third-party personal data. A closed account also loses the winner names on its
+      // lucky-draw history: there is no company left to raise a prize dispute.
+      const erased = await eraseCompanyCustomerData(manager, companyId, {
+        scrubDrawWinners: true,
+      });
 
       // Scrub the company. `qr_token` is randomised rather than nulled so the column's
       // NOT NULL + UNIQUE hold and any printed QR code stops resolving to anything.
@@ -180,11 +179,7 @@ export class AccountDeletionService {
         await this.tokenRepository.revokeAllRefreshTokensForUser(owner.id, manager);
       }
 
-      const result: PurgeResult = {
-        companyId,
-        purchasesDeleted: this.affected(purchases),
-        customersDeleted: this.affected(customers),
-      };
+      const result: PurgeResult = { companyId, ...erased };
       logger.warn(result, "Account purged — personal data erased, financial records retained");
       return result;
     });
@@ -218,11 +213,6 @@ export class AccountDeletionService {
       purgeAt,
       daysRemaining: Math.max(0, Math.ceil((purgeAt.getTime() - Date.now()) / 86_400_000)),
     };
-  }
-
-  /** `DELETE` through TypeORM's raw query returns `[rows, rowCount]`. */
-  private affected(result: unknown): number {
-    return Array.isArray(result) && typeof result[1] === "number" ? result[1] : 0;
   }
 }
 

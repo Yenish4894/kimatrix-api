@@ -4,19 +4,22 @@ import { fromAddress, getMailer } from "@/config/mailer";
 import { getRedisClient } from "@/config/redis.client";
 import { emailQueue } from "@/queues/email.queue";
 import { PaypalService } from "@/services/PaypalService";
+import { readSmtpHealth } from "@/services/SmtpHealthStore";
 import { logger } from "@/utils/logger";
+import { classifySmtpHealth, lastErrorText, type SmtpHealthRecord } from "@/utils/smtpHealth";
 import {
   RECENT_FAILURE_WINDOW_MS,
   classifyPaypal,
   classifyQueue,
-  classifySmtp,
   redact,
   smtpErrorDetail,
   type QueueSnapshot,
   type ServiceKey,
   type ServiceStatus,
+  type SmtpServiceStatus,
   type SystemStatus,
 } from "@/utils/systemStatus";
+import { withTimeout } from "@/utils/withTimeout";
 
 /**
  * Third-party health for the admin dashboard.
@@ -42,21 +45,7 @@ const FAILED_SAMPLE = 50;
 
 type CheckResult = Omit<ServiceStatus, "key" | "name">;
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(
-          Object.assign(new Error(`ETIMEDOUT: no answer within ${ms / 1000}s`), {
-            code: "ETIMEDOUT",
-          }),
-        ),
-      ms,
-    );
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
+const EMPTY_SMTP_RECORD: SmtpHealthRecord = { last: null, lastSuccessAt: null, lastFailure: null };
 
 function secrets(): string[] {
   return [config.SMTP_PASS, config.SMTP_USER, config.PAYPAL_CLIENT_SECRET, config.REDIS_PASSWORD];
@@ -86,15 +75,15 @@ export class SystemStatusService {
   }
 
   private async runChecks(): Promise<SystemStatus> {
-    // Read once and shared: the queue row reports it, and the SMTP row uses it to spot
-    // "login works but sends fail".
+    // Read once and shared: the queue row reports it, and the SMTP row falls back on it
+    // before any send outcome has been recorded.
     const queue = this.readQueue();
     const queueOrNull = queue.catch(() => null);
 
     const services = await Promise.all([
       this.guard("database", "Database", () => this.checkDatabase()),
       this.guard("redis", "Redis", () => this.checkRedis()),
-      this.guard("smtp", "Email (SMTP)", () => this.checkSmtp(queueOrNull)),
+      this.checkSmtp(queueOrNull),
       this.guard("paypal", "PayPal", () => this.checkPaypal()),
       this.guard("email_queue", "Email queue", () => this.checkQueue(queue)),
     ]);
@@ -145,22 +134,70 @@ export class SystemStatusService {
     return { status: "ok", latencyMs, detail: "PONG" };
   }
 
-  private async checkSmtp(queue: Promise<QueueSnapshot | null>): Promise<CheckResult> {
+  /**
+   * verify() still runs — it catches wrong credentials and an unreachable host — but it
+   * only proves the LOGIN. Hostinger's "Outbound sending is disabled" leaves the login
+   * working, so the recorded outcome of the latest real send (or hourly canary) is what
+   * decides "down"; a passing verify can never mask it. See utils/smtpHealth.ts.
+   *
+   * Never throws: its own catch turns anything unexpected into a "down" row.
+   */
+  private async checkSmtp(queue: Promise<QueueSnapshot | null>): Promise<SmtpServiceStatus> {
+    const base = { key: "smtp" as const, name: "Email (SMTP)" };
     const meta = { host: config.SMTP_HOST, port: config.SMTP_PORT, from: fromAddress() };
-    if (!config.SMTP_HOST) {
-      return { status: "down", latencyMs: null, detail: "SMTP is not configured", meta };
-    }
-    const start = performance.now();
-    let verify: { ok: true } | { ok: false; detail: string };
     try {
-      await withTimeout(getMailer().verify(), SMTP_TIMEOUT_MS);
-      verify = { ok: true };
+      // A Redis outage must not hide the verify result, so a failed read is "no record".
+      const recordPromise = withTimeout(readSmtpHealth(), REDIS_TIMEOUT_MS).catch(
+        (err: unknown) => {
+          logger.warn({ detail: errorText(err) }, "Could not read the SMTP send record");
+          return EMPTY_SMTP_RECORD;
+        },
+      );
+
+      const configured = Boolean(config.SMTP_HOST);
+      let verify: { ok: true } | { ok: false; detail: string } = { ok: true };
+      let latencyMs: number | null = null;
+      if (configured) {
+        const start = performance.now();
+        try {
+          await withTimeout(getMailer().verify(), SMTP_TIMEOUT_MS);
+          latencyMs = Math.round(performance.now() - start);
+        } catch (err) {
+          verify = { ok: false, detail: smtpErrorDetail(err, secrets()) };
+        }
+      }
+
+      const [record, q] = await Promise.all([recordPromise, queue]);
+      const { status, detail } = classifySmtpHealth({
+        configured,
+        verify,
+        record,
+        recentQueueFailures: q ? q.recentFailures : null,
+      });
+      return {
+        ...base,
+        status,
+        latencyMs,
+        detail,
+        meta: { ...meta, lastSendSource: record.last?.source ?? null },
+        lastSuccessAt: record.lastSuccessAt,
+        lastFailureAt: record.lastFailure?.at ?? null,
+        lastError: lastErrorText(record),
+      };
     } catch (err) {
-      verify = { ok: false, detail: smtpErrorDetail(err, secrets()) };
+      const detail = errorText(err);
+      logger.warn({ key: "smtp", detail }, "System status check failed");
+      return {
+        ...base,
+        status: "down",
+        latencyMs: null,
+        detail,
+        meta,
+        lastSuccessAt: null,
+        lastFailureAt: null,
+        lastError: null,
+      };
     }
-    const latencyMs = Math.round(performance.now() - start);
-    const { status, detail } = classifySmtp(verify, await queue);
-    return { status, latencyMs: verify.ok ? latencyMs : null, detail, meta };
   }
 
   private async checkPaypal(): Promise<CheckResult> {

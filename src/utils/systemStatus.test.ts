@@ -4,7 +4,6 @@ import {
   QUEUE_BACKLOG_DEGRADED,
   classifyPaypal,
   classifyQueue,
-  classifySmtp,
   redact,
   smtpErrorDetail,
   type QueueSnapshot,
@@ -90,23 +89,7 @@ describe("classifyQueue", () => {
   });
 });
 
-describe("classifySmtp", () => {
-  it("is down when verify fails", () => {
-    assert.deepEqual(classifySmtp({ ok: false, detail: "535 x" }, null), {
-      status: "down",
-      detail: "535 x",
-    });
-  });
-
-  it("is degraded when login works but sends fail", () => {
-    assert.equal(classifySmtp({ ok: true }, queue({ recentFailures: 1 })).status, "degraded");
-  });
-
-  it("is ok when login works and nothing failed", () => {
-    assert.equal(classifySmtp({ ok: true }, queue()).status, "ok");
-    assert.equal(classifySmtp({ ok: true }, null).status, "ok");
-  });
-});
+// The SMTP row's classification is tested in smtpHealth.test.ts.
 
 describe("classifyPaypal", () => {
   it("flags sandbox in production", () => {

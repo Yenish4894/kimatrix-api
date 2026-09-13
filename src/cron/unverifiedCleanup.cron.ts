@@ -6,6 +6,7 @@ import {
   UNVERIFIED_MIN_AGE_DAYS,
 } from "@/repositories/UnverifiedSignupRepository";
 import { logger } from "@/utils/logger";
+import { runExclusive } from "@/cron/runTracker";
 
 /**
  * Nightly removal of signups that never verified their email.
@@ -32,7 +33,6 @@ const ADVISORY_LOCK_KEY = 4_820_118;
 const MAX_PER_RUN = 200;
 
 let task: ScheduledTask | null = null;
-let running = false;
 
 export interface UnverifiedCleanupSummary {
   mode: "dry-run" | "enabled";
@@ -148,15 +148,7 @@ export function startUnverifiedCleanupCron(): void {
   task = cron.schedule(
     SCHEDULE,
     async () => {
-      if (running) return;
-      running = true;
-      try {
-        await cleanupUnverifiedSignups();
-      } catch (err) {
-        logger.error({ err }, "Unverified-signup cleanup run failed");
-      } finally {
-        running = false;
-      }
+      await runExclusive("unverifiedCleanup", () => cleanupUnverifiedSignups());
     },
     { timezone: "UTC" },
   );

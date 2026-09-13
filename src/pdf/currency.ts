@@ -4,8 +4,10 @@
  * jsPDF's built-in Helvetica is a WinAnsi font. Hand it one character outside that set
  * and it silently switches the whole string to UTF-16 against a font with no such
  * encoding — the amount comes out as a wrong glyph followed by null-byte-separated
- * digits. "₣" (U+20A3) is the CFA franc, so every Total Spend in the platform's
- * primary market rendered unreadable until this was added on the frontend.
+ * digits. The platform's primary markets are South Africa (ZAR, "R" — plain ASCII,
+ * safe) and India (INR, "₹" U+20B9 — outside WinAnsi), so without this every Total
+ * Spend for an Indian company would render unreadable. The other countries below are
+ * kept so any company registered elsewhere still gets a readable amount.
  *
  * Kept in step with the frontend module of the same name; a test asserts every country
  * the platform knows about survives the encoding.

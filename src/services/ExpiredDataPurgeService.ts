@@ -1,6 +1,6 @@
 import { AppDataSource } from "data-source";
 import { EXPIRY_RETENTION_DAYS } from "@/config/retention";
-import { affectedRows } from "@/utils/db";
+import { eraseCompanyCustomerData } from "@/services/customerDataErasure";
 import { logger } from "@/utils/logger";
 
 export interface PurgeCandidate {
@@ -125,13 +125,11 @@ export class ExpiredDataPurgeService {
         return null;
       }
 
-      // Purchases first: they reference customers with ON DELETE RESTRICT.
-      const purchases = await manager.query(`DELETE FROM "purchases" WHERE "company_id" = $1`, [
-        companyId,
-      ]);
-      const customers = await manager.query(`DELETE FROM "customers" WHERE "company_id" = $1`, [
-        companyId,
-      ]);
+      // The lucky-draw history keeps its winner snapshot: the account lives on, and a
+      // prize dispute can still be raised about a draw it ran.
+      const erased = await eraseCompanyCustomerData(manager, companyId, {
+        scrubDrawWinners: false,
+      });
 
       // The account itself is untouched. They can log in, subscribe, and start again.
       await manager.query(`UPDATE "companies" SET "data_purged_at" = $2 WHERE "id" = $1`, [
@@ -142,8 +140,7 @@ export class ExpiredDataPurgeService {
       const result: ExpiredPurgeResult = {
         companyId,
         name: company.name,
-        purchasesDeleted: affectedRows(purchases),
-        customersDeleted: affectedRows(customers),
+        ...erased,
       };
       logger.warn(
         { ...result, retentionDays: EXPIRY_RETENTION_DAYS },

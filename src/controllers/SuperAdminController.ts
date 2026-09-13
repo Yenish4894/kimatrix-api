@@ -183,7 +183,7 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       const { companyId } = req.params as { companyId: string };
       const { days } = req.body as ExtendTrialInput;
-      const result = await this.service.extendTrial(companyId, days, req.user!.id);
+      const result = await this.service.extendTrial(companyId, days, this.actor(req));
       return {
         data: result,
         message: `Trial extended. It now runs until ${result.trialEndsAt.toISOString().slice(0, 10)}.`,
@@ -236,7 +236,7 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       const { identityId } = req.params as { identityId: string };
       const { reason } = req.body as ReleaseTrialIdentityInput;
-      await this.service.releaseTrialIdentity(identityId, reason, req.user!.id);
+      await this.service.releaseTrialIdentity(identityId, reason, this.actor(req));
       return { data: null, message: "That identifier can be used for a free trial again." };
     });
   };

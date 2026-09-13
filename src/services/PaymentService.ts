@@ -12,6 +12,11 @@ import { BadRequestError, ConflictError, NotFoundError } from "@/errors/index";
 import type { Plan } from "@/entities/Plan";
 import { computeEntitlement } from "@/utils/entitlement";
 import { orderAmount, spinWindowClosed } from "@/utils/spinAddon";
+import {
+  decideStuckCapture,
+  RECONCILE_AFTER_MINUTES,
+  RECONCILE_BATCH_SIZE,
+} from "@/utils/paymentReconcile";
 
 export interface PlanDto {
   /** Lucky draw spins the plan includes, so the billing page can say so. */
@@ -367,6 +372,75 @@ export class PaymentService {
     // captured payment into an error for the buyer or a 5xx for PayPal's webhook.
     if (receiptFor) void this.notificationService.sendPaymentReceipt(receiptFor);
     return result;
+  }
+
+  /**
+   * Settles Orders-era payments stuck in `capturing` (BL-5).
+   *
+   * `capturePayment` deliberately leaves a row in `capturing` when the capture call
+   * fails after the claim — PayPal may have taken the money — and relies on the
+   * PAYMENT.CAPTURE.COMPLETED webhook to finish it. Nothing covered the webhook being
+   * lost, so the buyer could pay and never get access. This asks PayPal directly.
+   *
+   * Idempotent and safe beside the live paths: completion goes through the same locked
+   * `finalizeCapture` as capture and webhook, and failing is conditional on the row
+   * still being `capturing`. One row's failure never stops the rest.
+   */
+  async reconcileStuckCaptures(
+    opts: { olderThanMinutes?: number; limit?: number } = {},
+  ): Promise<{ completed: number; failed: number; waiting: number; errors: number }> {
+    const olderThanMinutes = opts.olderThanMinutes ?? RECONCILE_AFTER_MINUTES;
+    const claimedBefore = new Date(Date.now() - olderThanMinutes * 60_000);
+    const stuck = await this.paymentRepository.findStuckCapturing(
+      claimedBefore,
+      opts.limit ?? RECONCILE_BATCH_SIZE,
+    );
+    const counts = { completed: 0, failed: 0, waiting: 0, errors: 0 };
+
+    for (const row of stuck) {
+      try {
+        const order = await this.paypalService.getOrder(row.paypal_order_id);
+        const decision = decideStuckCapture(order);
+        const context = {
+          paymentId: row.id,
+          companyId: row.company_id,
+          orderId: row.paypal_order_id,
+        };
+
+        if (decision.action === "complete") {
+          await this.finalizeCapture(row.id, (order ?? {}) as Record<string, unknown>);
+          counts.completed++;
+          logger.warn(
+            context,
+            "Reconciled a stuck capture: PayPal had captured it — access granted",
+          );
+        } else if (decision.action === "fail") {
+          const changed = await this.paymentRepository.failIfCapturing(row.id, {
+            reason: decision.reason,
+            reconciledAt: new Date().toISOString(),
+            order: order ?? null,
+          });
+          if (changed) counts.failed++;
+          logger.warn(
+            { ...context, reason: decision.reason, changed },
+            "Reconciled a stuck capture: not captured at PayPal — marked failed",
+          );
+        } else {
+          counts.waiting++;
+          logger.warn(
+            { ...context, reason: decision.reason },
+            "Stuck capture still unresolved at PayPal — will check again",
+          );
+        }
+      } catch (err) {
+        counts.errors++;
+        logger.error(
+          { err, paymentId: row.id, orderId: row.paypal_order_id },
+          "Could not reconcile a stuck capture — will retry next run",
+        );
+      }
+    }
+    return counts;
   }
 
   async handleWebhook(headers: Record<string, string>, rawBody: string): Promise<void> {

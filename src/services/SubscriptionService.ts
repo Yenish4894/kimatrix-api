@@ -11,7 +11,10 @@ import { BadRequestError, ConflictError, NotFoundError } from "@/errors/index";
 import { computeEntitlement } from "@/utils/entitlement";
 import { returningRows } from "@/utils/db";
 import { logger } from "@/utils/logger";
-import { billingStartTime } from "@/utils/paypalBilling";
+import { billingStartTime, saleMatchesPlan, subscriptionBelongsTo } from "@/utils/paypalBilling";
+
+/** Same system-actor convention as PaypalWebhookService: no user, this marker instead. */
+const SYSTEM_ACTOR_EMAIL = "system:paypal-webhook";
 
 export interface SubscribeResult {
   subscriptionId: string;
@@ -139,13 +142,26 @@ export class SubscriptionService {
     companyId: string,
     paypalSubscriptionId: string,
   ): Promise<SubscriptionStatusResult> {
+    // Ownership from OUR row first. It records the company before the buyer is sent to
+    // PayPal, so every legitimate confirm finds it. Relying on PayPal's `custom_id`
+    // alone skipped the check whenever PayPal left it out, letting one company confirm
+    // (and apply the state of) another's subscription. Checking locally first also
+    // means a guessed id costs no PayPal call.
+    const [local] = (await AppDataSource.query(
+      `SELECT "company_id" FROM "subscriptions" WHERE "paypal_subscription_id" = $1`,
+      [paypalSubscriptionId],
+    )) as { company_id: string }[];
+    if (!subscriptionBelongsTo(local?.company_id, null, companyId)) {
+      throw NotFoundError("Subscription not found");
+    }
+
     const remote = await this.paypalService.getSubscription(paypalSubscriptionId);
     // A null here means PayPal has never heard of this id — almost always a customer
     // landing back with a hand-edited return URL. Same answer as the ownership check.
     if (!remote) throw NotFoundError("Subscription not found");
-    // `custom_id` is set to our company id at creation and echoed back — this is what
-    // stops one company confirming another's subscription by guessing an id.
-    if (remote.custom_id && remote.custom_id !== companyId) {
+    // `custom_id` is set to our company id at creation and echoed back; when present it
+    // must agree with our row too.
+    if (!subscriptionBelongsTo(local?.company_id, remote.custom_id, companyId)) {
       throw NotFoundError("Subscription not found");
     }
     await this.applyRemoteState(paypalSubscriptionId, remote);
@@ -328,9 +344,14 @@ export class SubscriptionService {
         // cycle we credited (the pre-change plan, when a change just happened). The sale
         // amount is the only real evidence of which plan was charged, so a price match
         // wins; otherwise PayPal's plan, then the stored one.
-        const plan = returningRows<{ id: string; duration_days: number }>(
+        const plan = returningRows<{
+          id: string;
+          duration_days: number;
+          price: string;
+          currency: string;
+        }>(
           await manager.query(
-            `SELECT p."id", p."duration_days"
+            `SELECT p."id", p."duration_days", p."price", p."currency"
              FROM "plans" p
             WHERE p."id" = $2
                OR ($1::varchar IS NOT NULL AND p."paypal_plan_id" = $1::varchar)
@@ -350,6 +371,56 @@ export class SubscriptionService {
           // makes PayPal retry rather than silently dropping a paid cycle.
           throw new Error(`creditCycle: no plan for subscription ${locked.id}`);
         }
+
+        // The sale must have paid a candidate plan's exact price, in its currency. The
+        // query above already prefers a price match, so reaching a mismatch here means
+        // NO plan this subscription could be on costs what was charged. Crediting a
+        // full period for it anyway (as this used to) meant a wrong PayPal plan, a
+        // currency slip or a partial charge bought the same access as the real price.
+        //
+        // Not credited, and not thrown either: a throw makes PayPal retry the webhook
+        // forever for a sale that will never match. Recorded for an admin instead —
+        // the money has moved, so a human must decide between crediting and refunding.
+        if (!saleMatchesPlan(params, plan)) {
+          await manager.query(
+            // NOT EXISTS: a replayed event for the same sale must not add a second row.
+            `INSERT INTO "admin_audit_log"
+               ("actor_user_id", "actor_email", "action", "entity_type", "entity_id",
+                "before", "after", "note")
+             -- Explicit casts: parameters in a SELECT list are not typed from the
+             -- target columns the way VALUES parameters are.
+             SELECT NULL::uuid, $1::varchar, 'payment.amount_mismatch', 'paypal_sale',
+                    $2::varchar, $3::jsonb, $4::jsonb, $5::varchar
+              WHERE NOT EXISTS (SELECT 1 FROM "admin_audit_log"
+                                 WHERE "action" = 'payment.amount_mismatch'
+                                   AND "entity_id" = $2::varchar)`,
+            [
+              SYSTEM_ACTOR_EMAIL,
+              params.saleId.slice(0, 64),
+              JSON.stringify({ planId: plan.id, price: plan.price, currency: plan.currency }),
+              JSON.stringify({
+                amount: params.amount,
+                currency: params.currency,
+                subscriptionId: locked.id,
+                paypalSubscriptionId: params.paypalSubscriptionId,
+                companyId: locked.company_id,
+              }),
+              "Recurring sale NOT credited: amount/currency differs from the plan. Check PayPal, then credit or refund.",
+            ],
+          );
+          logger.error(
+            {
+              saleId: params.saleId,
+              companyId: locked.company_id,
+              subscriptionId: locked.id,
+              paid: { amount: params.amount, currency: params.currency },
+              expected: { planId: plan.id, price: plan.price, currency: plan.currency },
+            },
+            "Recurring sale does not match the plan price — NOT credited, needs review",
+          );
+          return null;
+        }
+
         const sub = {
           id: locked.id,
           company_id: locked.company_id,

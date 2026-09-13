@@ -3,6 +3,14 @@ import Joi from "joi";
 const E164_PATTERN = /^\+[1-9]\d{1,14}$/;
 const PASSWORD_PATTERN = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).+$/;
 
+/**
+ * bcrypt only reads the first 72 BYTES of a password and silently ignores the rest, so
+ * a longer one would appear to work while most of it protected nothing. Refused
+ * outright instead. Bytes, not characters: accented letters and emoji take 2–4 each.
+ */
+export const PASSWORD_MAX_BYTES = 72;
+export const PASSWORD_TOO_LONG_MESSAGE = `Password is too long. Use at most ${PASSWORD_MAX_BYTES} bytes — ${PASSWORD_MAX_BYTES} plain characters, fewer if it has accented letters or emoji.`;
+
 export const commonPatterns = {
   uuid: Joi.string().uuid({ version: "uuidv4" }),
   email: Joi.string().trim().lowercase().email().max(255),
@@ -12,13 +20,28 @@ export const commonPatterns = {
     .max(64)
     .pattern(/^[a-zA-Z0-9_.-]+$/)
     .message("Username may only contain letters, digits, dot, underscore, or hyphen."),
+  // For NEW passwords only (register, reset, change). Login deliberately does not use
+  // it, so a password set under an older rule still signs in.
+  //
+  // The cap was 18, which refused passphrases and password-manager output. 128 is the
+  // character ceiling; the 72-byte bcrypt limit below is the one that usually binds.
   password: Joi.string()
     .min(8)
-    .max(18)
+    .max(128)
     .pattern(PASSWORD_PATTERN)
-    .message(
-      "Password must be 8–18 characters and include one lowercase letter, one uppercase letter, one number, and one special character.",
-    ),
+    .custom((value: string) => {
+      if (Buffer.byteLength(value, "utf8") > PASSWORD_MAX_BYTES) {
+        throw new Error("too many bytes");
+      }
+      return value;
+    })
+    .messages({
+      "string.min": "Password must be at least 8 characters.",
+      "string.max": "Password must be 128 characters or fewer.",
+      "string.pattern.base":
+        "Password must include one lowercase letter, one uppercase letter, one number, and one special character.",
+      "any.custom": PASSWORD_TOO_LONG_MESSAGE,
+    }),
   phoneE164: Joi.string()
     .trim()
     .pattern(E164_PATTERN)

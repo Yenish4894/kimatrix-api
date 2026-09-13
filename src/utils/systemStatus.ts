@@ -17,9 +17,22 @@ export interface ServiceStatus {
   meta?: Record<string, unknown>;
 }
 
+/**
+ * The SMTP row. Contract with the admin frontend: `status` is "up" | "degraded" | "down"
+ * (not "ok" like the other rows), plus the last send outcomes recorded by
+ * services/SmtpHealthStore.ts. All the ServiceStatus fields are still present.
+ */
+export interface SmtpServiceStatus extends Omit<ServiceStatus, "key" | "status"> {
+  key: "smtp";
+  status: "up" | "degraded" | "down";
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  lastError: string | null;
+}
+
 export interface SystemStatus {
   checkedAt: string;
-  services: ServiceStatus[];
+  services: (ServiceStatus | SmtpServiceStatus)[];
 }
 
 /** How far back a failed email job still counts as "sends are failing". */
@@ -103,26 +116,8 @@ export function classifyQueue(q: QueueSnapshot): { status: ServiceHealth; detail
   return { status: "ok", detail: backlog > 0 ? `${backlog} email(s) queued` : "Queue is empty" };
 }
 
-/**
- * SMTP verify() only proves we can log in. A suspended mailbox can still accept the
- * login while every send is rejected, so a verify that passes is downgraded when the
- * queue shows sends failing recently.
- */
-export function classifySmtp(
-  verify: { ok: true } | { ok: false; detail: string },
-  queue: QueueSnapshot | null,
-): { status: ServiceHealth; detail: string } {
-  if (!verify.ok) return { status: "down", detail: verify.detail };
-  if (queue && queue.recentFailures > 0) {
-    return {
-      status: "degraded",
-      detail: `Login works, but ${queue.recentFailures} send(s) failed in the last 24h${
-        queue.lastFailure ? `: ${queue.lastFailure.reason}` : ""
-      }`,
-    };
-  }
-  return { status: "ok", detail: "SMTP server accepted our login" };
-}
+// The SMTP row is classified in utils/smtpHealth.ts (classifySmtpHealth), from the
+// recorded outcome of real sends rather than from verify() plus the queue.
 
 export function classifyPaypal(
   token: { ok: true } | { ok: false; detail: string },
