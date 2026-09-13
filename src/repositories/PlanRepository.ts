@@ -91,6 +91,37 @@ export class PlanRepository {
   }
 
   /**
+   * Plain `findOne` by id: active or not, no relations. Archived (soft-deleted) rows are
+   * excluded by TypeORM as usual. The caller decides what state is acceptable.
+   */
+  async findByIdIncludingInactive(id: string, manager?: EntityManager): Promise<Plan | null> {
+    return this.getRepo(manager).findOne({ where: { id } });
+  }
+
+  /** Only one plan may wear the "Most Popular" badge at a time. */
+  async clearOtherPopular(keepPlanId: string, manager: EntityManager): Promise<void> {
+    await manager.query(
+      `UPDATE "plans" SET "is_popular" = false WHERE "id" <> $1 AND "is_popular" = true`,
+      [keepPlanId],
+    );
+  }
+
+  /**
+   * Releases the "most popular" badge from every plan that holds it, optionally
+   * except one. Must run BEFORE the write that claims the badge — see PlanService.
+   */
+  async clearAllPopular(manager: EntityManager, exceptPlanId?: string): Promise<void> {
+    if (exceptPlanId) {
+      await manager.query(
+        `UPDATE "plans" SET "is_popular" = false WHERE "is_popular" = true AND "id" <> $1`,
+        [exceptPlanId],
+      );
+      return;
+    }
+    await manager.query(`UPDATE "plans" SET "is_popular" = false WHERE "is_popular" = true`);
+  }
+
+  /**
    * Lookup regardless of state. Needed to render historical payments and to let the
    * admin act on a plan they have already disabled.
    */

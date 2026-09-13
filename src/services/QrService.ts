@@ -2,7 +2,8 @@ import { AppDataSource } from "data-source";
 import type { EntityManager } from "typeorm";
 import { config } from "@/config/index";
 import type { Company } from "@/entities/Company";
-import { Customer } from "@/entities/Customer";
+import type { Customer } from "@/entities/Customer";
+import { AdvisoryLockRepository } from "@/repositories/AdvisoryLockRepository";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { CustomerRepository } from "@/repositories/CustomerRepository";
 import { PurchaseRepository } from "@/repositories/PurchaseRepository";
@@ -58,9 +59,12 @@ export interface SubmitPurchaseResult {
 }
 
 export class QrService {
-  private companyRepository = new CompanyRepository();
-  private customerRepository = new CustomerRepository();
-  private purchaseRepository = new PurchaseRepository();
+  constructor(
+    private readonly companyRepository = new CompanyRepository(),
+    private readonly customerRepository = new CustomerRepository(),
+    private readonly purchaseRepository = new PurchaseRepository(),
+    private readonly advisoryLockRepository = new AdvisoryLockRepository(),
+  ) {}
 
   async resolveByToken(qrToken: string): Promise<QrResolveResult> {
     const company = await this.companyRepository.findByQrToken(qrToken);
@@ -194,17 +198,7 @@ export class QrService {
         manager,
       );
 
-      await manager
-        .createQueryBuilder()
-        .update(Customer)
-        .set({
-          totalInvoiceAmount: () => `total_invoice_amount + :amount`,
-          submissionCount: () => `submission_count + 1`,
-          lastSubmissionAt: now,
-        })
-        .where("id = :id", { id: customer.id })
-        .setParameters({ amount: invoiceAmountString })
-        .execute();
+      await this.customerRepository.addSubmission(customer.id, invoiceAmountString, now, manager);
 
       logger.info(
         {
@@ -245,10 +239,7 @@ export class QrService {
     manager: EntityManager,
   ): Promise<void> {
     for (const [namespace, value] of submissionLockKeys(companyId, mobile, invoiceNumber)) {
-      await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, [
-        namespace,
-        value,
-      ]);
+      await this.advisoryLockRepository.xactLockHashedPair(manager, namespace, value);
     }
   }
 

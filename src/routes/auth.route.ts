@@ -86,8 +86,9 @@ router.post(
   authController.changePassword,
 );
 
-// Authenticated: the user is already logged in after registering, so resend needs
-// no email in the body and therefore cannot be used to probe which addresses exist.
+// Authenticated: registration no longer signs the user in, but an unverified user can
+// log in and resend from the dashboard. Taking no email in the body means it cannot be
+// used to probe which addresses exist.
 router.post(
   "/email-verification/resend",
   authMiddleware,

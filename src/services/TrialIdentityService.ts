@@ -15,7 +15,7 @@ export interface TrialIdentifiers {
 }
 
 export class TrialIdentityService {
-  private repository = new TrialIdentityRepository();
+  constructor(private readonly repository = new TrialIdentityRepository()) {}
 
   /**
    * Which identifiers a company burns by taking a free trial.

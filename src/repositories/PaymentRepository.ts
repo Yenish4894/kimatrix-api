@@ -2,7 +2,7 @@ import type { EntityManager, Repository } from "typeorm";
 import { AppDataSource } from "data-source";
 import type { PaymentKind, PaymentStatus } from "@/entities/Payment";
 import { Payment } from "@/entities/Payment";
-import { affectedRows } from "@/utils/db";
+import { affectedRows, returningRows } from "@/utils/db";
 
 /** Raw row for reversal handling — snake_case because it comes straight from SQL. */
 export interface ReversalPaymentRow {
@@ -89,6 +89,15 @@ export function exclusiveUpperBound(to: Date): Date {
     to.getUTCMilliseconds() === 0;
   return new Date(to.getTime() + (isMidnight ? 24 * 60 * 60 * 1000 : 1));
 }
+
+/**
+ * Appends one reversal entry ($2, a one-element jsonb array) to `paypal_response`,
+ * rather than overwriting it: the capture body is how a later reversal event finds the
+ * row by capture id.
+ */
+const APPEND_REVERSAL_SQL = `COALESCE("paypal_response", '{}'::jsonb)
+        || jsonb_build_object('reversals',
+             COALESCE("paypal_response"->'reversals', '[]'::jsonb) || $2::jsonb)`;
 
 export class PaymentRepository {
   private getRepo(manager?: EntityManager): Repository<Payment> {
@@ -401,6 +410,98 @@ export class PaymentRepository {
       [paymentId, companyId],
     )) as InvoicePaymentRow[];
     return rows[0] ?? null;
+  }
+
+  /**
+   * The captured plan payment whose window contains now — the paid period a spin add-on
+   * joins. Undefined when no paid window is running.
+   */
+  async findCurrentPaidWindow(
+    companyId: string,
+  ): Promise<{ plan_id: string; starts_at: Date; ends_at: Date } | undefined> {
+    const [current] = (await AppDataSource.query(
+      `SELECT p."plan_id" AS plan_id,
+              p."subscription_starts_at" AS starts_at,
+              p."subscription_ends_at" AS ends_at
+         FROM "payments" p
+        WHERE p."company_id" = $1
+          AND p."status" = 'captured'
+          AND p."kind" IN ('order', 'subscription_cycle')
+          AND p."subscription_starts_at" <= now()
+          AND p."subscription_ends_at" > now()
+        ORDER BY p."subscription_starts_at" DESC
+        LIMIT 1`,
+      [companyId],
+    )) as { plan_id: string; starts_at: Date; ends_at: Date }[];
+    return current;
+  }
+
+  /**
+   * Records one credited recurring sale. The `paypal_sale_id` partial-unique index is
+   * the double-credit guard: a replay inserts nothing and this returns an empty array.
+   */
+  async insertSubscriptionCycle(
+    data: {
+      companyId: string;
+      planId: string;
+      subscriptionId: string;
+      saleId: string;
+      amount: string;
+      currency: string;
+    },
+    manager: EntityManager,
+  ): Promise<{ id: string }[]> {
+    return returningRows<{ id: string }>(
+      await manager.query(
+        `INSERT INTO "payments"
+             ("company_id", "plan_id", "subscription_id", "paypal_sale_id",
+              "kind", "status", "amount", "currency", "captured_at", "draw_spins")
+           VALUES ($1, $2, $3, $4, 'subscription_cycle', 'captured', $5, $6, now(), 0)
+           ON CONFLICT ("paypal_sale_id") WHERE "paypal_sale_id" IS NOT NULL DO NOTHING
+           RETURNING "id"`,
+        [data.companyId, data.planId, data.subscriptionId, data.saleId, data.amount, data.currency],
+      ),
+    );
+  }
+
+  /** Stamps the access window a payment bought. */
+  async setSubscriptionWindow(
+    id: string,
+    startsAt: Date,
+    endsAt: Date,
+    manager: EntityManager,
+  ): Promise<void> {
+    await manager.query(
+      `UPDATE "payments" SET "subscription_starts_at" = $2, "subscription_ends_at" = $3 WHERE "id" = $1`,
+      [id, startsAt, endsAt],
+    );
+  }
+
+  /** Partial refund: appends the entry ($2, JSON array) and leaves the status alone. */
+  async appendReversalEntry(
+    paymentId: string,
+    entryJson: string,
+    manager: EntityManager,
+  ): Promise<void> {
+    await manager.query(
+      `UPDATE "payments" SET "paypal_response" = ${APPEND_REVERSAL_SQL} WHERE "id" = $1`,
+      [paymentId, entryJson],
+    );
+  }
+
+  /** Full reversal: sets the new status and appends the entry ($2, JSON array). */
+  async markReversed(
+    paymentId: string,
+    entryJson: string,
+    newStatus: PaymentStatus,
+    manager: EntityManager,
+  ): Promise<void> {
+    await manager.query(
+      `UPDATE "payments"
+            SET "status" = $3, "paypal_response" = ${APPEND_REVERSAL_SQL}, "updated_at" = now()
+          WHERE "id" = $1`,
+      [paymentId, entryJson, newStatus],
+    );
   }
 
   async findByCompany(companyId: string, manager?: EntityManager): Promise<Payment[]> {

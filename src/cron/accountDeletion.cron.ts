@@ -1,5 +1,6 @@
 import cron, { type ScheduledTask } from "node-cron";
 import { AppDataSource } from "data-source";
+import { AdvisoryLockRepository } from "@/repositories/AdvisoryLockRepository";
 import { AccountDeletionService, DELETION_GRACE_DAYS } from "@/services/AccountDeletionService";
 import { runExclusive } from "@/cron/runTracker";
 import { logger } from "@/utils/logger";
@@ -34,13 +35,12 @@ let task: ScheduledTask | null = null;
  */
 export async function purgeDueAccounts(): Promise<number> {
   const service = new AccountDeletionService();
+  const locks = new AdvisoryLockRepository();
 
   const lockRunner = AppDataSource.createQueryRunner();
   await lockRunner.connect();
   try {
-    const [{ locked }] = (await lockRunner.query(`SELECT pg_try_advisory_lock($1) AS locked`, [
-      ADVISORY_LOCK_KEY,
-    ])) as [{ locked: boolean }];
+    const locked = await locks.trySessionLock(lockRunner, ADVISORY_LOCK_KEY);
     if (!locked) {
       logger.debug("Account purge skipped — another instance holds the lock");
       return 0;
@@ -50,7 +50,7 @@ export async function purgeDueAccounts(): Promise<number> {
     } finally {
       // Same session as the lock, so this can only fail if the connection itself died
       // — and then Postgres has already dropped the lock with the session.
-      await lockRunner.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]);
+      await locks.sessionUnlock(lockRunner, ADVISORY_LOCK_KEY);
     }
   } finally {
     await lockRunner.release();

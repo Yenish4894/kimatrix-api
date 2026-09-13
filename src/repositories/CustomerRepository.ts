@@ -177,6 +177,29 @@ export class CustomerRepository {
     );
   }
 
+  /**
+   * Adds one submission to the customer's running totals, in one statement so a
+   * concurrent submission cannot interleave. Runs in the submit transaction.
+   */
+  async addSubmission(
+    customerId: string,
+    amount: string,
+    submittedAt: Date,
+    manager: EntityManager,
+  ): Promise<void> {
+    await manager
+      .createQueryBuilder()
+      .update(Customer)
+      .set({
+        totalInvoiceAmount: () => `total_invoice_amount + :amount`,
+        submissionCount: () => `submission_count + 1`,
+        lastSubmissionAt: submittedAt,
+      })
+      .where("id = :id", { id: customerId })
+      .setParameters({ amount })
+      .execute();
+  }
+
   async create(data: Partial<Customer>, manager?: EntityManager): Promise<Customer> {
     const repo = this.getRepo(manager);
     return repo.save(repo.create(data));

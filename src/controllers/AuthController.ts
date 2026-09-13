@@ -22,10 +22,13 @@ export class AuthController extends BaseController {
         ip: req.ip,
         userAgent: req.get("user-agent") ?? undefined,
       });
+      // 202, not 201, and a constant message: this exact response is also what a
+      // submission with an already-registered login email gets (nothing is created
+      // then). Nothing here may vary with whether an account was made — audit SEC-2/3.
       return {
         data: result,
-        message: "Registration successful.",
-        statusCode: 201,
+        message: "Check your email to finish creating your account.",
+        statusCode: 202,
       };
     });
   };

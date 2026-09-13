@@ -51,9 +51,11 @@ export interface SpinResult {
  * disputed as having been decided by the merchant.
  */
 export class LuckyDrawService {
-  private repository = new LuckyDrawRepository();
-  private companyRepository = new CompanyRepository();
-  private settingsService = new SettingsService();
+  constructor(
+    private readonly repository = new LuckyDrawRepository(),
+    private readonly companyRepository = new CompanyRepository(),
+    private readonly settingsService = new SettingsService(),
+  ) {}
 
   /**
    * Free spins from the company's trial: the admin's current setting while the trial is

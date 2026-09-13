@@ -2,7 +2,7 @@ import cron, { type ScheduledTask } from "node-cron";
 import { AppDataSource } from "data-source";
 import { logger } from "@/utils/logger";
 import { runExclusive } from "@/cron/runTracker";
-import { affectedRows } from "@/utils/db";
+import { AdvisoryLockRepository } from "@/repositories/AdvisoryLockRepository";
 import { CompanyRepository, EXPIRY_NOTICE_KINDS } from "@/repositories/CompanyRepository";
 import { EmailService } from "@/services/EmailService";
 
@@ -20,70 +20,23 @@ const SCHEDULE = "5 * * * *";
  */
 const ADVISORY_LOCK_KEY = 4711_2026;
 
-/**
- * Projects `computeEntitlement()`'s status into `companies.subscription_status` and
- * keeps `is_active` in step with it.
- *
- * The CASE arms below are the SQL mirror of `utils/entitlement.ts` and must be kept in
- * the same precedence order as that function — deactivated, comped, paid-live,
- * trial-live, paid-lapsed, trial-lapsed, pending. **`entitlement.ts` is the spec; this
- * is a cache.** Nothing gates access on the column, so drift here degrades admin
- * filters and UI badges, never a customer's access.
- *
- * Two deliberate omissions:
- *  - `deactivated_at` is never written. Only an admin sets that, and
- *    `AuthService.login` throws Forbidden on it — an expiring company must still be
- *    able to log in to pay and to export.
- *  - Refresh tokens are never revoked. Same reason.
- */
-const RECONCILE_SQL = `
-UPDATE "companies" c
-   SET "subscription_status" = t.status,
-       "is_active" = t.has_access,
-       "updated_at" = now()
-  FROM (
-    SELECT "id",
-           CASE
-             WHEN "deactivated_at" IS NOT NULL THEN 'deactivated'
-             WHEN "is_comped" = true
-                  AND ("comped_until" IS NULL OR "comped_until" > now()) THEN 'active'
-             WHEN "subscription_expires_at" > now() THEN 'active'
-             WHEN "trial_ends_at" > now() THEN 'trialing'
-             WHEN "subscription_expires_at" IS NOT NULL THEN 'expired'
-             WHEN "trial_ends_at" IS NOT NULL THEN 'trial_expired'
-             ELSE 'pending'
-           END AS status,
-           CASE
-             WHEN "deactivated_at" IS NOT NULL THEN false
-             WHEN "is_comped" = true
-                  AND ("comped_until" IS NULL OR "comped_until" > now()) THEN true
-             WHEN "subscription_expires_at" > now() THEN true
-             WHEN "trial_ends_at" > now() THEN true
-             ELSE false
-           END AS has_access
-      FROM "companies"
-     WHERE "deleted_at" IS NULL
-  ) t
- WHERE c."id" = t."id"
-   AND c."deleted_at" IS NULL
-   -- Guard makes a re-run a genuine no-op rather than a full-table rewrite: without it
-   -- every row gets a new updated_at every hour, which is both a lie to anyone reading
-   -- that column and needless WAL.
-   AND (c."subscription_status" <> t.status OR c."is_active" <> t.has_access)
-`;
-
 let task: ScheduledTask | null = null;
 
+/**
+ * Projects `computeEntitlement()`'s status into `companies.subscription_status` and
+ * keeps `is_active` in step with it. The SQL, and why it is only a cache of
+ * `utils/entitlement.ts`, is SUBSCRIPTION_STATUS_RECONCILE_SQL in CompanyRepository.
+ */
 export async function reconcileSubscriptionStatuses(): Promise<number> {
+  const locks = new AdvisoryLockRepository();
+  const companyRepository = new CompanyRepository();
   return AppDataSource.transaction(async (manager) => {
-    const [{ locked }] = (await manager.query("SELECT pg_try_advisory_xact_lock($1) AS locked", [
-      ADVISORY_LOCK_KEY,
-    ])) as [{ locked: boolean }];
+    const locked = await locks.tryXactLock(manager, ADVISORY_LOCK_KEY);
     if (!locked) {
       logger.debug("Subscription status reconcile skipped — another instance holds the lock");
       return 0;
     }
-    return affectedRows(await manager.query(RECONCILE_SQL));
+    return companyRepository.reconcileSubscriptionStatuses(manager);
   });
 }
 
@@ -108,16 +61,18 @@ export async function reconcileSubscriptionStatuses(): Promise<number> {
 export async function sendExpiryNotices(): Promise<number> {
   const companyRepository = new CompanyRepository();
   const emailService = new EmailService();
+  const locks = new AdvisoryLockRepository();
   let sent = 0;
 
   for (const kind of EXPIRY_NOTICE_KINDS) {
     let targets: Awaited<ReturnType<CompanyRepository["claimExpiryNotices"]>> = [];
     try {
       targets = await AppDataSource.transaction(async (manager) => {
-        const [{ locked }] = (await manager.query(
-          "SELECT pg_try_advisory_xact_lock($1, $2) AS locked",
-          [ADVISORY_LOCK_KEY, EXPIRY_NOTICE_KINDS.indexOf(kind)],
-        )) as [{ locked: boolean }];
+        const locked = await locks.tryXactLockPair(
+          manager,
+          ADVISORY_LOCK_KEY,
+          EXPIRY_NOTICE_KINDS.indexOf(kind),
+        );
         if (!locked) return [];
         return companyRepository.claimExpiryNotices(kind, manager);
       });

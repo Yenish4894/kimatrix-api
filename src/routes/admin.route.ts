@@ -190,7 +190,7 @@ router.get(
   controller.listTrialIdentities,
 );
 
-// The safety valve for a burned identifier. See SuperAdminService.releaseTrialIdentity.
+// The safety valve for a burned identifier. See AdminTrialService.releaseTrialIdentity.
 router.post(
   "/trial-identities/:identityId/release",
   validateRequest(trialIdentityIdParamSchema, ValidationTarget.PARAMS),

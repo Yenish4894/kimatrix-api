@@ -50,7 +50,7 @@ export interface IssueTokenContext {
 const REFRESH_TOKEN_BYTES = 48;
 
 export class TokenService {
-  private tokenRepository = new TokenRepository();
+  constructor(private readonly tokenRepository = new TokenRepository()) {}
 
   signAccessToken(user: User, companyId?: string): { token: string; expiresAt: Date } {
     const payload: Pick<AccessTokenPayload, "sub" | "userType" | "companyId"> = {

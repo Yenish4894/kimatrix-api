@@ -109,10 +109,12 @@ export interface MonthlyReport {
 }
 
 export class CompanyService {
-  private companyRepository = new CompanyRepository();
-  private customerRepository = new CustomerRepository();
-  private purchaseRepository = new PurchaseRepository();
-  private auditService = new AuditService();
+  constructor(
+    private readonly companyRepository = new CompanyRepository(),
+    private readonly customerRepository = new CustomerRepository(),
+    private readonly purchaseRepository = new PurchaseRepository(),
+    private readonly auditService = new AuditService(),
+  ) {}
 
   /**
    * Replaces the company's QR token, so a leaked or misprinted code stops working at
@@ -129,16 +131,10 @@ export class CompanyService {
     const qrToken = generateRandomToken(24);
 
     await AppDataSource.transaction(async (manager) => {
-      const [current] = (await manager.query(
-        `SELECT "qr_token" FROM "companies" WHERE "id" = $1 FOR UPDATE`,
-        [companyId],
-      )) as { qr_token: string }[];
+      const current = await this.companyRepository.findQrTokenForUpdate(companyId, manager);
       if (!current) throw NotFoundError("Company not found");
 
-      await manager.query(
-        `UPDATE "companies" SET "qr_token" = $2, "updated_at" = now() WHERE "id" = $1`,
-        [companyId, qrToken],
-      );
+      await this.companyRepository.setQrToken(companyId, qrToken, manager);
 
       await this.auditService.record(
         {

@@ -1,15 +1,17 @@
 import type { EntityManager } from "typeorm";
 import { AppDataSource } from "data-source";
-import { Company } from "@/entities/Company";
-import { Plan } from "@/entities/Plan";
-import { Subscription, type SubscriptionState } from "@/entities/Subscription";
+import type { SubscriptionState } from "@/entities/Subscription";
+import { AuditLogRepository } from "@/repositories/AuditLogRepository";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
+import { PaymentRepository } from "@/repositories/PaymentRepository";
+import { PlanRepository } from "@/repositories/PlanRepository";
+import { SubscriptionRepository } from "@/repositories/SubscriptionRepository";
 import { PaypalService } from "@/services/PaypalService";
 import { NotificationService } from "@/services/NotificationService";
 import { config } from "@/config/index";
 import { BadRequestError, ConflictError, NotFoundError } from "@/errors/index";
 import { computeEntitlement } from "@/utils/entitlement";
-import { returningRows } from "@/utils/db";
+import type { TransactionRunner } from "@/utils/db";
 import { logger } from "@/utils/logger";
 import { billingStartTime, saleMatchesPlan, subscriptionBelongsTo } from "@/utils/paypalBilling";
 
@@ -45,9 +47,16 @@ const PAYPAL_STATUS_MAP: Record<string, SubscriptionState> = {
 };
 
 export class SubscriptionService {
-  private paypalService = new PaypalService();
-  private companyRepository = new CompanyRepository();
-  private notificationService = new NotificationService();
+  constructor(
+    private readonly paypalService = new PaypalService(),
+    private readonly companyRepository = new CompanyRepository(),
+    private readonly notificationService = new NotificationService(),
+    private readonly subscriptionRepository = new SubscriptionRepository(),
+    private readonly planRepository = new PlanRepository(),
+    private readonly paymentRepository = new PaymentRepository(),
+    private readonly auditLogRepository = new AuditLogRepository(),
+    private readonly db: TransactionRunner = AppDataSource,
+  ) {}
 
   /**
    * Starts a subscription and returns the PayPal approval URL.
@@ -64,13 +73,12 @@ export class SubscriptionService {
    * ready and their remaining paid time is honoured.
    */
   async subscribe(companyId: string, planId: string): Promise<SubscribeResult> {
-    const company = await AppDataSource.getRepository(Company).findOne({
-      where: { id: companyId },
-      relations: ["currentSubscription"],
-    });
+    const company = await this.companyRepository.findByIdWithRelations(companyId, [
+      "currentSubscription",
+    ]);
     if (!company) throw NotFoundError("Company not found");
 
-    const plan = await AppDataSource.getRepository(Plan).findOne({ where: { id: planId } });
+    const plan = await this.planRepository.findByIdIncludingInactive(planId);
     if (!plan || !plan.isActive || plan.archivedAt != null) {
       throw NotFoundError("That plan is no longer available.");
     }
@@ -95,14 +103,9 @@ export class SubscriptionService {
     // Create the local row FIRST, inside a transaction. The partial unique index
     // `uq_subscriptions_one_live_per_company` is what stops two tabs both reaching
     // PayPal — the second insert fails before any money is involved.
-    const local = await AppDataSource.transaction(async (manager) => {
-      const row = manager.getRepository(Subscription).create({
-        company: { id: companyId } as Company,
-        plan: { id: planId } as Plan,
-        status: "pending",
-      });
-      return manager.getRepository(Subscription).save(row);
-    });
+    const local = await this.db.transaction(async (manager) =>
+      this.subscriptionRepository.createPending(companyId, planId, manager),
+    );
 
     const base = config.FRONTEND_BASE_URL.replace(/\/$/, "");
     try {
@@ -115,7 +118,7 @@ export class SubscriptionService {
         customId: companyId,
       });
 
-      await AppDataSource.getRepository(Subscription).update(local.id, {
+      await this.subscriptionRepository.update(local.id, {
         paypalSubscriptionId: created.id,
       });
 
@@ -127,7 +130,7 @@ export class SubscriptionService {
     } catch (err) {
       // Leaving a `pending` row behind would trip the one-live-per-company index and
       // permanently block the customer from retrying.
-      await AppDataSource.getRepository(Subscription).delete(local.id);
+      await this.subscriptionRepository.delete(local.id);
       throw err;
     }
   }
@@ -147,11 +150,9 @@ export class SubscriptionService {
     // alone skipped the check whenever PayPal left it out, letting one company confirm
     // (and apply the state of) another's subscription. Checking locally first also
     // means a guessed id costs no PayPal call.
-    const [local] = (await AppDataSource.query(
-      `SELECT "company_id" FROM "subscriptions" WHERE "paypal_subscription_id" = $1`,
-      [paypalSubscriptionId],
-    )) as { company_id: string }[];
-    if (!subscriptionBelongsTo(local?.company_id, null, companyId)) {
+    const localCompanyId =
+      await this.subscriptionRepository.findCompanyIdByPaypalId(paypalSubscriptionId);
+    if (!subscriptionBelongsTo(localCompanyId, null, companyId)) {
       throw NotFoundError("Subscription not found");
     }
 
@@ -161,7 +162,7 @@ export class SubscriptionService {
     if (!remote) throw NotFoundError("Subscription not found");
     // `custom_id` is set to our company id at creation and echoed back; when present it
     // must agree with our row too.
-    if (!subscriptionBelongsTo(local?.company_id, remote.custom_id, companyId)) {
+    if (!subscriptionBelongsTo(localCompanyId, remote.custom_id, companyId)) {
       throw NotFoundError("Subscription not found");
     }
     await this.applyRemoteState(paypalSubscriptionId, remote);
@@ -185,28 +186,11 @@ export class SubscriptionService {
     },
     eventTime?: Date,
   ): Promise<void> {
-    await AppDataSource.transaction(async (manager) => {
-      // Raw locking read rather than a QueryBuilder with joins.
-      //
-      // `setLock("pessimistic_write")` puts FOR UPDATE on the whole statement, and
-      // Postgres rejects FOR UPDATE against the nullable side of a LEFT JOIN outright —
-      // so the obvious `leftJoinAndSelect("s.company")` version fails at runtime, not
-      // at compile time. Selecting the FK column directly locks exactly the one row we
-      // intend to and needs no join at all.
-      const sub = returningRows<{
-        id: string;
-        company_id: string;
-        status: SubscriptionState;
-        last_event_at: Date | null;
-      }>(
-        await manager.query(
-          `SELECT "id", "company_id", "status", "last_event_at"
-             FROM "subscriptions"
-            WHERE "paypal_subscription_id" = $1
-            FOR UPDATE`,
-          [paypalSubscriptionId],
-        ),
-      )[0];
+    await this.db.transaction(async (manager) => {
+      // Raw locking read rather than a QueryBuilder with joins — see
+      // SubscriptionRepository: FOR UPDATE cannot sit on the nullable side of a LEFT
+      // JOIN, and selecting the FK column directly locks exactly the one row we intend.
+      const sub = await this.subscriptionRepository.lockByPaypalId(paypalSubscriptionId, manager);
       if (!sub) {
         logger.warn({ paypalSubscriptionId }, "No local subscription for this PayPal id");
         return;
@@ -241,12 +225,16 @@ export class SubscriptionService {
         ? new Date(remote.billing_info.next_billing_time)
         : null;
 
-      await manager.getRepository(Subscription).update(sub.id, {
-        status,
-        nextBillingTime: nextBilling,
-        ...(eventTime ? { lastEventAt: eventTime } : {}),
-        paypalResponse: remote as unknown as Record<string, never>,
-      });
+      await this.subscriptionRepository.update(
+        sub.id,
+        {
+          status,
+          nextBillingTime: nextBilling,
+          ...(eventTime ? { lastEventAt: eventTime } : {}),
+          paypalResponse: remote as unknown as Record<string, never>,
+        },
+        manager,
+      );
 
       // PayPal is the authority on which plan the subscription is on. Without this, a
       // plan change that needed buyer approval was never recorded locally — changePlan
@@ -254,27 +242,11 @@ export class SubscriptionService {
       // `plans.paypal_plan_id`; when several versions share one PayPal plan, the one
       // already stored wins, otherwise the newest. No match leaves the row alone.
       if (remote.plan_id) {
-        await manager.query(
-          // The stored plan is read through its own scalar subquery. An earlier version
-          // referenced a sibling FROM item from inside `m`, which Postgres rejects
-          // ("missing FROM-clause entry") — caught by EXPLAIN against the real schema.
-          `UPDATE "subscriptions" s
-              SET "plan_id" = m."id"
-             FROM (SELECT p."id" FROM "plans" p
-                    WHERE p."paypal_plan_id" = $2
-                    ORDER BY (p."id" = (SELECT s0."plan_id" FROM "subscriptions" s0
-                                         WHERE s0."id" = $1)) DESC,
-                             p."created_at" DESC
-                    LIMIT 1) m
-            WHERE s."id" = $1 AND s."plan_id" IS DISTINCT FROM m."id"`,
-          [sub.id, remote.plan_id],
-        );
+        await this.subscriptionRepository.syncPlanFromPaypal(sub.id, remote.plan_id, manager);
       }
 
       if (status === "active" || status === "past_due") {
-        await manager
-          .getRepository(Company)
-          .update(sub.company_id, { currentSubscription: { id: sub.id } as never });
+        await this.companyRepository.setCurrentSubscription(sub.company_id, sub.id, manager);
       }
 
       logger.info({ paypalSubscriptionId, status }, "Subscription state applied");
@@ -310,9 +282,9 @@ export class SubscriptionService {
 
     // The newly credited payment, or null for an unknown subscription or a replay. Only a
     // real credit gets a receipt, and only once the credit has committed.
-    const credited = await AppDataSource.transaction(
+    const credited = await this.db.transaction(
       async (
-        manager,
+        manager: EntityManager,
       ): Promise<{
         paymentId: string;
         companyId: string;
@@ -320,21 +292,10 @@ export class SubscriptionService {
         // Same reasoning as applyRemoteState: FOR UPDATE cannot be combined with a LEFT
         // JOIN in Postgres, and we only want to lock the subscription row anyway — not
         // the company and plan rows a join would drag in.
-        const locked = returningRows<{
-          id: string;
-          company_id: string;
-          plan_id: string;
-          trial_ends_at: Date | null;
-        }>(
-          await manager.query(
-            `SELECT s."id", s."company_id", s."plan_id", c."trial_ends_at"
-             FROM "subscriptions" s
-             JOIN "companies" c ON c."id" = s."company_id"
-            WHERE s."paypal_subscription_id" = $1
-            FOR UPDATE OF s`,
-            [params.paypalSubscriptionId],
-          ),
-        )[0];
+        const locked = await this.subscriptionRepository.lockForCycleCredit(
+          params.paypalSubscriptionId,
+          manager,
+        );
         if (!locked) {
           logger.warn({ ...params }, "Cycle payment for an unknown subscription");
           return null;
@@ -344,28 +305,16 @@ export class SubscriptionService {
         // cycle we credited (the pre-change plan, when a change just happened). The sale
         // amount is the only real evidence of which plan was charged, so a price match
         // wins; otherwise PayPal's plan, then the stored one.
-        const plan = returningRows<{
-          id: string;
-          duration_days: number;
-          price: string;
-          currency: string;
-        }>(
-          await manager.query(
-            `SELECT p."id", p."duration_days", p."price", p."currency"
-             FROM "plans" p
-            WHERE p."id" = $2
-               OR ($1::varchar IS NOT NULL AND p."paypal_plan_id" = $1::varchar)
-               OR p."id" = (SELECT "plan_id" FROM "payments"
-                             WHERE "subscription_id" = $3 AND "kind" = 'subscription_cycle'
-                             ORDER BY "created_at" DESC LIMIT 1)
-            ORDER BY (p."price" = $4::numeric AND p."currency" = $5) DESC,
-                     COALESCE(p."paypal_plan_id" = $1::varchar, false) DESC,
-                     (p."id" = $2) DESC,
-                     p."created_at" DESC
-            LIMIT 1`,
-            [remotePlanId, locked.plan_id, locked.id, params.amount, params.currency],
-          ),
-        )[0];
+        const plan = await this.subscriptionRepository.findCyclePlan(
+          {
+            remotePlanId,
+            storedPlanId: locked.plan_id,
+            subscriptionId: locked.id,
+            amount: params.amount,
+            currency: params.currency,
+          },
+          manager,
+        );
         if (!plan) {
           // Unreachable while plans are never deleted (FK RESTRICT), but a throw here
           // makes PayPal retry rather than silently dropping a paid cycle.
@@ -382,32 +331,19 @@ export class SubscriptionService {
         // forever for a sale that will never match. Recorded for an admin instead —
         // the money has moved, so a human must decide between crediting and refunding.
         if (!saleMatchesPlan(params, plan)) {
-          await manager.query(
-            // NOT EXISTS: a replayed event for the same sale must not add a second row.
-            `INSERT INTO "admin_audit_log"
-               ("actor_user_id", "actor_email", "action", "entity_type", "entity_id",
-                "before", "after", "note")
-             -- Explicit casts: parameters in a SELECT list are not typed from the
-             -- target columns the way VALUES parameters are.
-             SELECT NULL::uuid, $1::varchar, 'payment.amount_mismatch', 'paypal_sale',
-                    $2::varchar, $3::jsonb, $4::jsonb, $5::varchar
-              WHERE NOT EXISTS (SELECT 1 FROM "admin_audit_log"
-                                 WHERE "action" = 'payment.amount_mismatch'
-                                   AND "entity_id" = $2::varchar)`,
-            [
-              SYSTEM_ACTOR_EMAIL,
-              params.saleId.slice(0, 64),
-              JSON.stringify({ planId: plan.id, price: plan.price, currency: plan.currency }),
-              JSON.stringify({
-                amount: params.amount,
-                currency: params.currency,
-                subscriptionId: locked.id,
-                paypalSubscriptionId: params.paypalSubscriptionId,
-                companyId: locked.company_id,
-              }),
-              "Recurring sale NOT credited: amount/currency differs from the plan. Check PayPal, then credit or refund.",
-            ],
-          );
+          await this.auditLogRepository.insertAmountMismatchOnce(manager, {
+            actorEmail: SYSTEM_ACTOR_EMAIL,
+            saleId: params.saleId.slice(0, 64),
+            before: { planId: plan.id, price: plan.price, currency: plan.currency },
+            after: {
+              amount: params.amount,
+              currency: params.currency,
+              subscriptionId: locked.id,
+              paypalSubscriptionId: params.paypalSubscriptionId,
+              companyId: locked.company_id,
+            },
+            note: "Recurring sale NOT credited: amount/currency differs from the plan. Check PayPal, then credit or refund.",
+          });
           logger.error(
             {
               saleId: params.saleId,
@@ -434,16 +370,16 @@ export class SubscriptionService {
         const trialEnd = locked.trial_ends_at ? new Date(locked.trial_ends_at) : null;
         const creditFrom = trialEnd && trialEnd > new Date() ? trialEnd : new Date();
 
-        const inserted = returningRows<{ id: string }>(
-          await manager.query(
-            `INSERT INTO "payments"
-             ("company_id", "plan_id", "subscription_id", "paypal_sale_id",
-              "kind", "status", "amount", "currency", "captured_at", "draw_spins")
-           VALUES ($1, $2, $3, $4, 'subscription_cycle', 'captured', $5, $6, now(), 0)
-           ON CONFLICT ("paypal_sale_id") WHERE "paypal_sale_id" IS NOT NULL DO NOTHING
-           RETURNING "id"`,
-            [sub.company_id, sub.plan_id, sub.id, params.saleId, params.amount, params.currency],
-          ),
+        const inserted = await this.paymentRepository.insertSubscriptionCycle(
+          {
+            companyId: sub.company_id,
+            planId: sub.plan_id,
+            subscriptionId: sub.id,
+            saleId: params.saleId,
+            amount: params.amount,
+            currency: params.currency,
+          },
+          manager,
         );
 
         if (inserted.length === 0) {
@@ -463,21 +399,25 @@ export class SubscriptionService {
             },
             manager,
           );
-        await manager.query(
-          `UPDATE "payments" SET "subscription_starts_at" = $2, "subscription_ends_at" = $3 WHERE "id" = $1`,
-          [inserted[0]!.id, subscriptionStartsAt, subscriptionEndsAt],
+        await this.paymentRepository.setSubscriptionWindow(
+          inserted[0]!.id,
+          subscriptionStartsAt,
+          subscriptionEndsAt,
+          manager,
         );
 
-        await manager.getRepository(Subscription).update(sub.id, {
-          status: "active",
-          currentPeriodEnd: subscriptionEndsAt,
-          // A successful charge clears a past-due state and re-arms the expiry notice,
-          // since the deadline has moved.
-          currentPeriodStart: subscriptionStartsAt,
-        });
-        await manager
-          .getRepository(Company)
-          .update(sub.company_id, { subscriptionEndedNoticeFor: null });
+        await this.subscriptionRepository.update(
+          sub.id,
+          {
+            status: "active",
+            currentPeriodEnd: subscriptionEndsAt,
+            // A successful charge clears a past-due state and re-arms the expiry notice,
+            // since the deadline has moved.
+            currentPeriodStart: subscriptionStartsAt,
+          },
+          manager,
+        );
+        await this.companyRepository.clearSubscriptionEndedNotice(sub.company_id, manager);
 
         logger.info(
           { companyId: sub.company_id, saleId: params.saleId, until: subscriptionEndsAt },
@@ -502,10 +442,9 @@ export class SubscriptionService {
    * is terminal: there is no resume, only resubscribe, and the UI says so.
    */
   async cancel(companyId: string, reason: string): Promise<{ accessUntil: Date | null }> {
-    const company = await AppDataSource.getRepository(Company).findOne({
-      where: { id: companyId },
-      relations: ["currentSubscription"],
-    });
+    const company = await this.companyRepository.findByIdWithRelations(companyId, [
+      "currentSubscription",
+    ]);
     const sub = company?.currentSubscription;
     if (!company || !sub || !["active", "past_due", "pending_cancel"].includes(sub.status)) {
       throw NotFoundError("You don't have an active subscription to cancel.");
@@ -518,7 +457,7 @@ export class SubscriptionService {
       await this.paypalService.cancelSubscription(sub.paypalSubscriptionId, reason);
     }
 
-    await AppDataSource.getRepository(Subscription).update(sub.id, {
+    await this.subscriptionRepository.update(sub.id, {
       status: "pending_cancel",
       cancelledAt: new Date(),
       cancelReason: reason.slice(0, 255),
@@ -543,10 +482,9 @@ export class SubscriptionService {
     companyId: string,
     newPlanId: string,
   ): Promise<{ approvalUrl: string | null; effectiveFrom: Date | null }> {
-    const company = await AppDataSource.getRepository(Company).findOne({
-      where: { id: companyId },
-      relations: ["currentSubscription"],
-    });
+    const company = await this.companyRepository.findByIdWithRelations(companyId, [
+      "currentSubscription",
+    ]);
     const sub = company?.currentSubscription;
     if (!company || !sub || !["active", "past_due"].includes(sub.status)) {
       throw NotFoundError("You don't have an active subscription to change.");
@@ -555,7 +493,7 @@ export class SubscriptionService {
       throw BadRequestError("That subscription is not ready yet. Please try again shortly.");
     }
 
-    const plan = await AppDataSource.getRepository(Plan).findOne({ where: { id: newPlanId } });
+    const plan = await this.planRepository.findByIdIncludingInactive(newPlanId);
     if (!plan || !plan.isActive || plan.archivedAt != null || !plan.paypalPlanId) {
       throw NotFoundError("That plan is no longer available.");
     }
@@ -580,7 +518,7 @@ export class SubscriptionService {
       effectiveFrom = remote?.billing_info?.next_billing_time
         ? new Date(remote.billing_info.next_billing_time)
         : null;
-      await AppDataSource.getRepository(Subscription).update(sub.id, {
+      await this.subscriptionRepository.update(sub.id, {
         plan: { id: plan.id } as never,
         nextBillingTime: effectiveFrom,
       });
@@ -594,10 +532,10 @@ export class SubscriptionService {
   }
 
   async getStatus(companyId: string): Promise<SubscriptionStatusResult> {
-    const company = await AppDataSource.getRepository(Company).findOne({
-      where: { id: companyId },
-      relations: ["currentSubscription", "currentSubscription.plan"],
-    });
+    const company = await this.companyRepository.findByIdWithRelations(companyId, [
+      "currentSubscription",
+      "currentSubscription.plan",
+    ]);
     const sub = company?.currentSubscription;
     if (!sub) {
       return {
@@ -626,11 +564,11 @@ export class SubscriptionService {
 
   /** Used by admin deactivation — a banned company must stop being charged. */
   async cancelForAdmin(companyId: string, manager?: EntityManager): Promise<void> {
-    const repo = (manager ?? AppDataSource.manager).getRepository(Company);
-    const company = await repo.findOne({
-      where: { id: companyId },
-      relations: ["currentSubscription"],
-    });
+    const company = await this.companyRepository.findByIdWithRelations(
+      companyId,
+      ["currentSubscription"],
+      manager,
+    );
     const sub = company?.currentSubscription;
     if (!sub || !["active", "past_due", "pending", "pending_cancel"].includes(sub.status)) return;
 
@@ -640,11 +578,15 @@ export class SubscriptionService {
         "Account deactivated by KIMates",
       );
     }
-    await (manager ?? AppDataSource.manager).getRepository(Subscription).update(sub.id, {
-      status: "cancelled",
-      cancelledAt: new Date(),
-      cancelReason: "Admin deactivation",
-    });
+    await this.subscriptionRepository.update(
+      sub.id,
+      {
+        status: "cancelled",
+        cancelledAt: new Date(),
+        cancelReason: "Admin deactivation",
+      },
+      manager,
+    );
     logger.info(
       { companyId, subscriptionId: sub.id },
       "Subscription cancelled by admin deactivation",

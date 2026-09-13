@@ -9,6 +9,7 @@ import { renderEmailVerificationEmail } from "@/templates/emailVerification.temp
 import { renderSubscriptionNoticeEmail } from "@/templates/subscriptionNotice.template";
 import { renderAccountInviteEmail } from "@/templates/accountInvite.template";
 import { logger } from "@/utils/logger";
+import { emailDomainForLog } from "@/utils/redact";
 import { EXPIRY_RETENTION_DAYS } from "@/config/retention";
 import { ReportService } from "@/services/ReportService";
 import { hasExhaustedRetries } from "@/workers/retry";
@@ -37,7 +38,10 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       html: rendered.html,
       text: rendered.text,
     });
-    logger.info({ jobId: job.id, type: data.type, to: data.to }, "Email sent");
+    logger.info(
+      { jobId: job.id, type: data.type, toDomain: emailDomainForLog(data.to) },
+      "Email sent",
+    );
     return;
   }
 
@@ -54,7 +58,10 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       html: rendered.html,
       text: rendered.text,
     });
-    logger.info({ jobId: job.id, type: data.type, to: data.to }, "Email sent");
+    logger.info(
+      { jobId: job.id, type: data.type, toDomain: emailDomainForLog(data.to) },
+      "Email sent",
+    );
     return;
   }
 
@@ -72,7 +79,10 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       html: rendered.html,
       text: rendered.text,
     });
-    logger.info({ jobId: job.id, type: data.type, to: data.to }, "Email sent");
+    logger.info(
+      { jobId: job.id, type: data.type, toDomain: emailDomainForLog(data.to) },
+      "Email sent",
+    );
     return;
   }
 
@@ -114,7 +124,10 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       text: rendered.text,
       ...(attachments.length ? { attachments } : {}),
     });
-    logger.info({ jobId: job.id, type: data.type, kind: data.kind, to: data.to }, "Email sent");
+    logger.info(
+      { jobId: job.id, type: data.type, kind: data.kind, toDomain: emailDomainForLog(data.to) },
+      "Email sent",
+    );
     return;
   }
 
@@ -145,7 +158,10 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       ...(data.text ? { text: data.text } : {}),
       ...(attachments.length ? { attachments } : {}),
     });
-    logger.info({ jobId: job.id, type: data.type, to: data.to }, "Email sent");
+    logger.info(
+      { jobId: job.id, type: data.type, toDomain: emailDomainForLog(data.to) },
+      "Email sent",
+    );
     return;
   }
 
@@ -283,7 +299,12 @@ async function releaseNoticeClaim(job: Job<EmailJobData>): Promise<void> {
     await new CompanyRepository().releaseExpiryNotice(data.kind, data.companyId);
     await job.remove();
     logger.warn(
-      { jobId: job.id, kind: data.kind, companyId: data.companyId, to: data.to },
+      {
+        jobId: job.id,
+        kind: data.kind,
+        companyId: data.companyId,
+        toDomain: emailDomainForLog(data.to),
+      },
       "Notice delivery failed for good; claim released so the cron will retry it",
     );
   } catch (err) {

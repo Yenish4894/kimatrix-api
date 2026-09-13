@@ -10,7 +10,14 @@ import type {
   SendBulkEmailInput,
 } from "@/validation/schemas/admin.schema";
 import type { TrialIdentity } from "@/entities/TrialIdentity";
-import { SuperAdminService } from "@/services/SuperAdminService";
+import { AdminAuditLogService } from "@/services/AdminAuditLogService";
+import { AdminBanService } from "@/services/AdminBanService";
+import { AdminBulkEmailService } from "@/services/AdminBulkEmailService";
+import { AdminCompanyService } from "@/services/AdminCompanyService";
+import { AdminCompService } from "@/services/AdminCompService";
+import { AdminDeletionService } from "@/services/AdminDeletionService";
+import { AdminOnboardingService } from "@/services/AdminOnboardingService";
+import { AdminTrialService } from "@/services/AdminTrialService";
 import { PlanService } from "@/services/PlanService";
 import { SettingsService } from "@/services/SettingsService";
 import { AuditService } from "@/services/AuditService";
@@ -29,7 +36,14 @@ import type {
 } from "@/validation/schemas/admin.schema";
 
 export class SuperAdminController extends BaseController {
-  private service = new SuperAdminService();
+  private companyService = new AdminCompanyService();
+  private onboardingService = new AdminOnboardingService();
+  private banService = new AdminBanService();
+  private trialService = new AdminTrialService();
+  private compService = new AdminCompService();
+  private deletionService = new AdminDeletionService();
+  private bulkEmailService = new AdminBulkEmailService();
+  private auditLogService = new AdminAuditLogService();
   private planService = new PlanService();
   private settingsService = new SettingsService();
   private auditService = new AuditService();
@@ -38,7 +52,7 @@ export class SuperAdminController extends BaseController {
   listCompanies = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       const query = req.query as unknown as ListCompaniesQueryInput;
-      const { items, total } = await this.service.listCompanies(query);
+      const { items, total } = await this.companyService.listCompanies(query);
       return { data: this.paginationResponse(items, total, query.page, query.limit) };
     });
   };
@@ -46,7 +60,7 @@ export class SuperAdminController extends BaseController {
   getCompany = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       const companyId = req.params["companyId"] as string;
-      const company = await this.service.getCompany(companyId);
+      const company = await this.companyService.getCompany(companyId);
       return { data: company };
     });
   };
@@ -54,7 +68,7 @@ export class SuperAdminController extends BaseController {
   createCompany = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       if (!req.user) throw UnauthorizedError("Admin context missing");
-      const result = await this.service.createCompany(
+      const result = await this.onboardingService.createCompany(
         { id: req.user.id, email: req.user.email },
         req.body as CreateCompanyInput,
       );
@@ -70,7 +84,7 @@ export class SuperAdminController extends BaseController {
       if (!req.user) throw UnauthorizedError("Admin context missing");
       const companyId = req.params["companyId"] as string;
       const { reason } = req.body as CompanyBanInput;
-      await this.service.deactivateCompany(
+      await this.banService.deactivateCompany(
         { id: req.user.id, email: req.user.email },
         companyId,
         reason,
@@ -83,14 +97,14 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       if (!req.user) throw UnauthorizedError("Admin context missing");
       const companyId = req.params["companyId"] as string;
-      await this.service.activateCompany({ id: req.user.id, email: req.user.email }, companyId);
+      await this.banService.activateCompany({ id: req.user.id, email: req.user.email }, companyId);
       return { data: null, message: "Company activated" };
     });
   };
 
   getPlatformStats = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
-      const stats = await this.service.getPlatformStats();
+      const stats = await this.companyService.getPlatformStats();
       return { data: stats };
     });
   };
@@ -183,7 +197,7 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       const { companyId } = req.params as { companyId: string };
       const { days } = req.body as ExtendTrialInput;
-      const result = await this.service.extendTrial(companyId, days, this.actor(req));
+      const result = await this.trialService.extendTrial(companyId, days, this.actor(req));
       return {
         data: result,
         message: `Trial extended. It now runs until ${result.trialEndsAt.toISOString().slice(0, 10)}.`,
@@ -195,7 +209,7 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       const { companyId } = req.params as { companyId: string };
       const input = req.body as SetCompInput;
-      const result = await this.service.setComp(
+      const result = await this.compService.setComp(
         companyId,
         {
           isComped: input.isComped,
@@ -215,7 +229,7 @@ export class SuperAdminController extends BaseController {
   listTrialIdentities = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       const { companyId } = req.params as { companyId: string };
-      const identities = await this.service.listTrialIdentities(companyId);
+      const identities = await this.trialService.listTrialIdentities(companyId);
       return {
         // Only the masked preview leaves the server. The stored value is an HMAC and
         // cannot be reversed, but the preview is what support actually needs, and
@@ -236,7 +250,7 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       const { identityId } = req.params as { identityId: string };
       const { reason } = req.body as ReleaseTrialIdentityInput;
-      await this.service.releaseTrialIdentity(identityId, reason, this.actor(req));
+      await this.trialService.releaseTrialIdentity(identityId, reason, this.actor(req));
       return { data: null, message: "That identifier can be used for a free trial again." };
     });
   };
@@ -244,7 +258,7 @@ export class SuperAdminController extends BaseController {
   getDeletionStatus = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       const { companyId } = req.params as { companyId: string };
-      return { data: await this.service.getDeletionStatus(companyId) };
+      return { data: await this.deletionService.getDeletionStatus(companyId) };
     });
   };
 
@@ -252,7 +266,7 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       const { companyId } = req.params as { companyId: string };
       const { reason } = req.body as AdminDeletionInput;
-      const status = await this.service.requestDeletionForCompany(
+      const status = await this.deletionService.requestDeletionForCompany(
         companyId,
         { id: req.user!.id, email: req.user!.email },
         reason,
@@ -270,7 +284,7 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       const { companyId } = req.params as { companyId: string };
       const { reason } = req.body as AdminDeletionInput;
-      await this.service.cancelDeletionForCompany(
+      await this.deletionService.cancelDeletionForCompany(
         companyId,
         { id: req.user!.id, email: req.user!.email },
         reason,
@@ -284,7 +298,7 @@ export class SuperAdminController extends BaseController {
   listAuditLog = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       const query = req.query as unknown as AuditLogQueryInput;
-      const { items, total } = await this.service.listAuditLog(query);
+      const { items, total } = await this.auditLogService.listAuditLog(query);
       return { data: this.paginationResponse(items, total, query.page, query.limit) };
     });
   };
@@ -293,7 +307,7 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       const { companyId } = req.params as { companyId: string };
       const query = req.query as unknown as ListCustomersQueryInput;
-      const { items, total } = await this.service.listCompanyCustomers(companyId, query);
+      const { items, total } = await this.companyService.listCompanyCustomers(companyId, query);
       return { data: this.paginationResponse(items, total, query.page, query.limit) };
     });
   };
@@ -302,7 +316,7 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       const { companyId } = req.params as { companyId: string };
       const query = req.query as unknown as ListPurchasesQueryInput;
-      const { items, total } = await this.service.listCompanyPurchases(companyId, query);
+      const { items, total } = await this.companyService.listCompanyPurchases(companyId, query);
       return { data: this.paginationResponse(items, total, query.page, query.limit) };
     });
   };
@@ -310,14 +324,14 @@ export class SuperAdminController extends BaseController {
   getCompanyDraws = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       const { companyId } = req.params as { companyId: string };
-      return { data: await this.service.getCompanyDraws(companyId) };
+      return { data: await this.companyService.getCompanyDraws(companyId) };
     });
   };
 
   resendInvite = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await this.handle(req, res, next, async () => {
       const { companyId } = req.params as { companyId: string };
-      const result = await this.service.resendInvite(this.actor(req), companyId);
+      const result = await this.onboardingService.resendInvite(this.actor(req), companyId);
       return { data: result, message: result.message };
     });
   };
@@ -331,7 +345,7 @@ export class SuperAdminController extends BaseController {
       // array, and silently treating "a,b" as one address would mail nobody.
       const file = (req as Request & { file?: Express.Multer.File }).file;
 
-      const result = await this.service.sendBulkEmail(
+      const result = await this.bulkEmailService.sendBulkEmail(
         { id: req.user!.id, email: req.user!.email },
         subject,
         body,
@@ -350,7 +364,7 @@ export class SuperAdminController extends BaseController {
         50,
         Math.max(1, parseInt((req.query["limit"] as string) ?? "10", 10) || 10),
       );
-      const { items, total } = await this.service.listBulkEmailLogs(page, limit);
+      const { items, total } = await this.bulkEmailService.listBulkEmailLogs(page, limit);
       return { data: this.paginationResponse(items, total, page, limit) };
     });
   };

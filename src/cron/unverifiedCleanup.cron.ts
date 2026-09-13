@@ -1,6 +1,7 @@
 import cron, { type ScheduledTask } from "node-cron";
 import { AppDataSource } from "data-source";
 import { config } from "@/config/index";
+import { AdvisoryLockRepository } from "@/repositories/AdvisoryLockRepository";
 import {
   UnverifiedSignupRepository,
   UNVERIFIED_MIN_AGE_DAYS,
@@ -47,6 +48,7 @@ export async function cleanupUnverifiedSignups(
   enabled: boolean = config.UNVERIFIED_CLEANUP_ENABLED,
 ): Promise<UnverifiedCleanupSummary | null> {
   const repository = new UnverifiedSignupRepository();
+  const locks = new AdvisoryLockRepository();
 
   // Session-level lock on a pinned connection — the same pattern as the expiry purge,
   // for the same reason: lock and unlock through the pool can land on different
@@ -54,9 +56,7 @@ export async function cleanupUnverifiedSignups(
   const lockRunner = AppDataSource.createQueryRunner();
   await lockRunner.connect();
   try {
-    const [{ locked }] = (await lockRunner.query(`SELECT pg_try_advisory_lock($1) AS locked`, [
-      ADVISORY_LOCK_KEY,
-    ])) as [{ locked: boolean }];
+    const locked = await locks.trySessionLock(lockRunner, ADVISORY_LOCK_KEY);
     if (!locked) {
       logger.debug("Unverified-signup cleanup skipped — another instance holds the lock");
       return null;
@@ -64,7 +64,7 @@ export async function cleanupUnverifiedSignups(
     try {
       return await runCleanup(repository, enabled);
     } finally {
-      await lockRunner.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]);
+      await locks.sessionUnlock(lockRunner, ADVISORY_LOCK_KEY);
     }
   } finally {
     await lockRunner.release();

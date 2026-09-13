@@ -21,25 +21,30 @@ export interface ErasedCustomerData {
  * account (`scrubDrawWinners`) also loses the winner name and mobile — there is no
  * company left to raise a dispute, and the customer asked for everything to go.
  */
-export async function eraseCompanyCustomerData(
-  manager: EntityManager,
-  companyId: string,
-  opts: { scrubDrawWinners: boolean },
-): Promise<ErasedCustomerData> {
-  // Purchases first: they reference customers with ON DELETE RESTRICT.
-  const purchases = await manager.query(`DELETE FROM "purchases" WHERE "company_id" = $1`, [
-    companyId,
-  ]);
-  const customers = await manager.query(`DELETE FROM "customers" WHERE "company_id" = $1`, [
-    companyId,
-  ]);
-  if (opts.scrubDrawWinners) {
-    await manager.query(
-      `UPDATE "lucky_draws"
+export class CustomerDataErasureRepository {
+  async eraseCompanyCustomerData(
+    manager: EntityManager,
+    companyId: string,
+    opts: { scrubDrawWinners: boolean },
+  ): Promise<ErasedCustomerData> {
+    // Purchases first: they reference customers with ON DELETE RESTRICT.
+    const purchases = await manager.query(`DELETE FROM "purchases" WHERE "company_id" = $1`, [
+      companyId,
+    ]);
+    const customers = await manager.query(`DELETE FROM "customers" WHERE "company_id" = $1`, [
+      companyId,
+    ]);
+    if (opts.scrubDrawWinners) {
+      await manager.query(
+        `UPDATE "lucky_draws"
           SET "winner_name" = NULL, "winner_mobile_masked" = NULL
         WHERE "company_id" = $1`,
-      [companyId],
-    );
+        [companyId],
+      );
+    }
+    return {
+      purchasesDeleted: affectedRows(purchases),
+      customersDeleted: affectedRows(customers),
+    };
   }
-  return { purchasesDeleted: affectedRows(purchases), customersDeleted: affectedRows(customers) };
 }

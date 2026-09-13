@@ -1,5 +1,5 @@
-import { AppDataSource } from "data-source";
 import { config, isProduction } from "@/config/index";
+import { DatabaseHealthRepository } from "@/repositories/DatabaseHealthRepository";
 import { fromAddress, getMailer } from "@/config/mailer";
 import { getRedisClient } from "@/config/redis.client";
 import { emailQueue } from "@/queues/email.queue";
@@ -59,6 +59,8 @@ let cached: { at: number; value: SystemStatus } | null = null;
 let inFlight: Promise<SystemStatus> | null = null;
 
 export class SystemStatusService {
+  constructor(private readonly databaseHealth = new DatabaseHealthRepository()) {}
+
   async getStatus(refresh = false): Promise<SystemStatus> {
     if (!refresh && cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.value;
     // Concurrent loads (two admins, or a double render) share one run instead of
@@ -113,7 +115,7 @@ export class SystemStatusService {
 
   private async checkDatabase(): Promise<CheckResult> {
     const { latencyMs } = await this.timed(() =>
-      withTimeout(AppDataSource.query("SELECT 1"), DB_TIMEOUT_MS),
+      withTimeout(this.databaseHealth.ping(), DB_TIMEOUT_MS),
     );
     return { status: "ok", latencyMs, detail: "Responding" };
   }

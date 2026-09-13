@@ -1,6 +1,6 @@
 import type { EntityManager, Repository } from "typeorm";
 import { AppDataSource } from "data-source";
-import { returningRows } from "@/utils/db";
+import { affectedRows, returningRows } from "@/utils/db";
 import { Company, type SubscriptionStatus } from "@/entities/Company";
 
 export type CompanyStatusFilter = "all" | "active" | "inactive";
@@ -123,6 +123,67 @@ export const EXPIRY_NOTICE_SQL: Record<
   },
 };
 
+/** The owner's login email and the company bits an owner email needs. */
+export interface OwnerContactRow {
+  company_name: string;
+  qr_token: string;
+  deactivated_at: Date | null;
+  email: string;
+  user_active: boolean;
+}
+
+/**
+ * Projects `computeEntitlement()`'s status into `companies.subscription_status` and
+ * keeps `is_active` in step with it.
+ *
+ * The CASE arms below are the SQL mirror of `utils/entitlement.ts` and must be kept in
+ * the same precedence order as that function — deactivated, comped, paid-live,
+ * trial-live, paid-lapsed, trial-lapsed, pending. **`entitlement.ts` is the spec; this
+ * is a cache.** Nothing gates access on the column, so drift here degrades admin
+ * filters and UI badges, never a customer's access.
+ *
+ * Two deliberate omissions:
+ *  - `deactivated_at` is never written. Only an admin sets that, and
+ *    `AuthService.login` throws Forbidden on it — an expiring company must still be
+ *    able to log in to pay and to export.
+ *  - Refresh tokens are never revoked. Same reason.
+ */
+export const SUBSCRIPTION_STATUS_RECONCILE_SQL = `
+UPDATE "companies" c
+   SET "subscription_status" = t.status,
+       "is_active" = t.has_access,
+       "updated_at" = now()
+  FROM (
+    SELECT "id",
+           CASE
+             WHEN "deactivated_at" IS NOT NULL THEN 'deactivated'
+             WHEN "is_comped" = true
+                  AND ("comped_until" IS NULL OR "comped_until" > now()) THEN 'active'
+             WHEN "subscription_expires_at" > now() THEN 'active'
+             WHEN "trial_ends_at" > now() THEN 'trialing'
+             WHEN "subscription_expires_at" IS NOT NULL THEN 'expired'
+             WHEN "trial_ends_at" IS NOT NULL THEN 'trial_expired'
+             ELSE 'pending'
+           END AS status,
+           CASE
+             WHEN "deactivated_at" IS NOT NULL THEN false
+             WHEN "is_comped" = true
+                  AND ("comped_until" IS NULL OR "comped_until" > now()) THEN true
+             WHEN "subscription_expires_at" > now() THEN true
+             WHEN "trial_ends_at" > now() THEN true
+             ELSE false
+           END AS has_access
+      FROM "companies"
+     WHERE "deleted_at" IS NULL
+  ) t
+ WHERE c."id" = t."id"
+   AND c."deleted_at" IS NULL
+   -- Guard makes a re-run a genuine no-op rather than a full-table rewrite: without it
+   -- every row gets a new updated_at every hour, which is both a lie to anyone reading
+   -- that column and needless WAL.
+   AND (c."subscription_status" <> t.status OR c."is_active" <> t.has_access)
+`;
+
 export class CompanyRepository {
   private getRepo(manager?: EntityManager): Repository<Company> {
     return manager ? manager.getRepository(Company) : AppDataSource.getRepository(Company);
@@ -130,6 +191,105 @@ export class CompanyRepository {
 
   async findById(id: string, manager?: EntityManager): Promise<Company | null> {
     return this.getRepo(manager).findOne({ where: { id } });
+  }
+
+  /** `findOne` by id with the given relations loaded. */
+  async findByIdWithRelations(
+    id: string,
+    relations: string[],
+    manager?: EntityManager,
+  ): Promise<Company | null> {
+    return this.getRepo(manager).findOne({ where: { id }, relations });
+  }
+
+  /** Points the company at its live subscription. */
+  async setCurrentSubscription(
+    companyId: string,
+    subscriptionId: string,
+    manager: EntityManager,
+  ): Promise<void> {
+    await this.getRepo(manager).update(companyId, {
+      currentSubscription: { id: subscriptionId } as never,
+    });
+  }
+
+  /** Re-arms the subscription-ended notice after the deadline moved. */
+  async clearSubscriptionEndedNotice(companyId: string, manager: EntityManager): Promise<void> {
+    await this.getRepo(manager).update(companyId, { subscriptionEndedNoticeFor: null });
+  }
+
+  /** Locks the company row and reads its paid expiry. */
+  async lockSubscriptionExpiry(
+    companyId: string,
+    manager: EntityManager,
+  ): Promise<{ subscription_expires_at: Date | null } | undefined> {
+    return returningRows<{ subscription_expires_at: Date | null }>(
+      await manager.query(
+        `SELECT "subscription_expires_at" FROM "companies" WHERE "id" = $1 FOR UPDATE`,
+        [companyId],
+      ),
+    )[0];
+  }
+
+  /**
+   * Takes back exactly the length of one paid window (`endsAt - startsAt`) from the
+   * paid expiry, keeping any time stacked on top of it. Undefined when the company has
+   * no paid expiry.
+   */
+  async subtractPaidWindow(
+    companyId: string,
+    startsAt: Date,
+    endsAt: Date,
+    manager: EntityManager,
+  ): Promise<{ subscription_expires_at: Date | null } | undefined> {
+    return returningRows<{ subscription_expires_at: Date | null }>(
+      await manager.query(
+        `UPDATE "companies"
+                SET "subscription_expires_at" =
+                      "subscription_expires_at" - ($3::timestamptz - $2::timestamptz),
+                    "subscription_ended_notice_for" = NULL
+              WHERE "id" = $1 AND "subscription_expires_at" IS NOT NULL
+              RETURNING "subscription_expires_at"`,
+        [companyId, startsAt, endsAt],
+      ),
+    )[0];
+  }
+
+  /** Locks the company row and reads its current QR token. */
+  async findQrTokenForUpdate(
+    companyId: string,
+    manager: EntityManager,
+  ): Promise<{ qr_token: string } | undefined> {
+    const [current] = (await manager.query(
+      `SELECT "qr_token" FROM "companies" WHERE "id" = $1 FOR UPDATE`,
+      [companyId],
+    )) as { qr_token: string }[];
+    return current;
+  }
+
+  async setQrToken(companyId: string, qrToken: string, manager: EntityManager): Promise<void> {
+    await manager.query(
+      `UPDATE "companies" SET "qr_token" = $2, "updated_at" = now() WHERE "id" = $1`,
+      [companyId, qrToken],
+    );
+  }
+
+  /** The owner's LOGIN email plus company name and QR token. Undefined if no such company. */
+  async findOwnerContact(companyId: string): Promise<OwnerContactRow | undefined> {
+    const rows = (await AppDataSource.query(
+      `SELECT c."name" AS "company_name", c."qr_token", c."deactivated_at",
+              u."email", u."is_active" AS "user_active"
+         FROM "companies" c
+         JOIN "users" u ON u."id" = c."owner_user_id"
+        WHERE c."id" = $1`,
+      [companyId],
+    )) as OwnerContactRow[];
+    return rows[0];
+  }
+
+  /** Runs SUBSCRIPTION_STATUS_RECONCILE_SQL; returns the number of rows changed. */
+  async reconcileSubscriptionStatuses(manager: EntityManager): Promise<number> {
+    return affectedRows(await manager.query(SUBSCRIPTION_STATUS_RECONCILE_SQL));
   }
 
   async findByIdWithOwner(id: string, manager?: EntityManager): Promise<Company | null> {

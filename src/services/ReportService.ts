@@ -1,6 +1,6 @@
-import { AppDataSource } from "data-source";
 import { BadRequestError, NotFoundError } from "@/middleware/errorHandler";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
+import { ReportRepository } from "@/repositories/ReportRepository";
 import {
   renderCustomersPdf,
   renderPurchasesPdf,
@@ -22,7 +22,10 @@ import { logger } from "@/utils/logger";
 const MAX_REPORT_ROWS = 5_000;
 
 export class ReportService {
-  private companyRepository = new CompanyRepository();
+  constructor(
+    private readonly companyRepository = new CompanyRepository(),
+    private readonly reportRepository = new ReportRepository(),
+  ) {}
 
   /**
    * Render one of the three reports for a company.
@@ -74,31 +77,12 @@ export class ReportService {
    * spenders if a very large company ever hits it, instead of an arbitrary slice.
    */
   private async customerRows(companyId: string): Promise<CustomerRow[]> {
-    const rows = (await AppDataSource.manager.query(
-      `SELECT c."full_name", c."mobile", c."vehicle_number", c."total_invoice_amount",
-              c."submission_count", c."first_submission_at", c."last_submission_at"
-         FROM "customers" c
-        WHERE c."company_id" = $1 AND c."deleted_at" IS NULL
-        ORDER BY c."total_invoice_amount" DESC NULLS LAST, c."id"
-        LIMIT $2`,
-      [companyId, MAX_REPORT_ROWS + 1],
-    )) as CustomerRow[];
-
+    const rows = await this.reportRepository.customerRows(companyId, MAX_REPORT_ROWS + 1);
     return this.capped(rows, companyId, "customers");
   }
 
   private async purchaseRows(companyId: string): Promise<PurchaseRow[]> {
-    const rows = (await AppDataSource.manager.query(
-      `SELECT p."invoice_number", p."invoice_amount", cu."mobile",
-              p."full_name_snapshot", p."vehicle_number_snapshot", p."submitted_at"
-         FROM "purchases" p
-         INNER JOIN "customers" cu ON cu."id" = p."customer_id"
-        WHERE p."company_id" = $1 AND p."deleted_at" IS NULL AND p."voided_at" IS NULL
-        ORDER BY p."submitted_at" DESC, p."id"
-        LIMIT $2`,
-      [companyId, MAX_REPORT_ROWS + 1],
-    )) as PurchaseRow[];
-
+    const rows = await this.reportRepository.purchaseRows(companyId, MAX_REPORT_ROWS + 1);
     return this.capped(rows, companyId, "purchases");
   }
 

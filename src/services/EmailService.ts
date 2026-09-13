@@ -4,6 +4,7 @@ import { renderBulkAnnouncementEmail } from "@/templates/bulkAnnouncement.templa
 import { config } from "@/config/index";
 import { SettingsService } from "@/services/SettingsService";
 import { logger } from "@/utils/logger";
+import { emailDomainForLog } from "@/utils/redact";
 import type { ExpiryNoticeKind } from "@/repositories/CompanyRepository";
 import type { RefundAccessChange } from "@/templates/refundProcessed.template";
 import { emailJobIds } from "@/utils/billingEmails";
@@ -56,7 +57,10 @@ export class EmailService {
       // password-reset request into a 500.
       { jobId: `pwreset-${encodeSegment(input.to)}-${Date.now()}` },
     );
-    logger.info({ jobId: job.id, to: input.to }, "Password reset email enqueued");
+    logger.info(
+      { jobId: job.id, toDomain: emailDomainForLog(input.to) },
+      "Password reset email enqueued",
+    );
   }
 
   async enqueueEmailVerification(input: SendEmailVerificationInput): Promise<void> {
@@ -79,7 +83,10 @@ export class EmailService {
       },
       { jobId: `verify-${encodeSegment(input.to)}-${Date.now()}` },
     );
-    logger.info({ jobId: job.id, to: input.to }, "Email verification enqueued");
+    logger.info(
+      { jobId: job.id, toDomain: emailDomainForLog(input.to) },
+      "Email verification enqueued",
+    );
   }
 
   /**
@@ -106,7 +113,7 @@ export class EmailService {
       }),
       { jobId: `bulk-${encodeSegment(input.to)}-${Date.now()}` },
     );
-    logger.info({ jobId: job.id, to: input.to }, "Bulk email enqueued");
+    logger.info({ jobId: job.id, toDomain: emailDomainForLog(input.to) }, "Bulk email enqueued");
   }
 
   /**
@@ -132,7 +139,10 @@ export class EmailService {
       expiresInHours: input.expiresInHours,
       freeUntil: input.freeUntil ? input.freeUntil.toISOString() : null,
     });
-    logger.info({ jobId: job.id, to: input.to }, "Account invite enqueued");
+    logger.info(
+      { jobId: job.id, toDomain: emailDomainForLog(input.to) },
+      "Account invite enqueued",
+    );
   }
 
   async enqueueSubscriptionNotice(input: SendSubscriptionNoticeInput): Promise<void> {
@@ -190,7 +200,10 @@ export class EmailService {
       },
       { jobId: `${encodeSegment(input.tag)}-${encodeSegment(input.to)}-${Date.now()}` },
     );
-    logger.info({ jobId: job.id, to: input.to, tag: input.tag }, "Rendered email enqueued");
+    logger.info(
+      { jobId: job.id, toDomain: emailDomainForLog(input.to), tag: input.tag },
+      "Rendered email enqueued",
+    );
   }
 
   // ── Emails that report a committed change: QR code, receipt, failed renewal, refund ──

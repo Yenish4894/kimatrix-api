@@ -1,17 +1,10 @@
-import { AppDataSource } from "data-source";
+import { CompanyRepository, type OwnerContactRow } from "@/repositories/CompanyRepository";
+import { SubscriptionRepository } from "@/repositories/SubscriptionRepository";
 import { EmailService } from "@/services/EmailService";
 import { PaymentHistoryService } from "@/services/PaymentHistoryService";
 import { buildPublicQrUrl } from "@/utils/qrUrl";
 import { logger } from "@/utils/logger";
 import type { RefundAccessChange } from "@/templates/refundProcessed.template";
-
-interface OwnerRow {
-  company_name: string;
-  qr_token: string;
-  deactivated_at: Date | null;
-  email: string;
-  user_active: boolean;
-}
 
 export interface RefundNotice {
   paymentId: string;
@@ -36,8 +29,12 @@ export interface RefundNotice {
  * Log lines carry ids only, never an address.
  */
 export class NotificationService {
-  private emailService = new EmailService();
-  private paymentHistoryService = new PaymentHistoryService();
+  constructor(
+    private readonly emailService = new EmailService(),
+    private readonly paymentHistoryService = new PaymentHistoryService(),
+    private readonly companyRepository = new CompanyRepository(),
+    private readonly subscriptionRepository = new SubscriptionRepository(),
+  ) {}
 
   /** The QR poster, once, when the owner first proves their mailbox. */
   sendQrCode(companyId: string): Promise<void> {
@@ -75,24 +72,7 @@ export class NotificationService {
    */
   sendRenewalFailed(paypalSubscriptionId: string): Promise<void> {
     return this.safely("renewal failed", { paypalSubscriptionId }, async () => {
-      const rows = (await AppDataSource.query(
-        `SELECT s."id" AS "subscription_id", s."status",
-                c."name" AS "company_name", c."subscription_expires_at",
-                u."email", u."is_active" AS "user_active"
-           FROM "subscriptions" s
-           JOIN "companies" c ON c."id" = s."company_id"
-           JOIN "users" u ON u."id" = c."owner_user_id"
-          WHERE s."paypal_subscription_id" = $1`,
-        [paypalSubscriptionId],
-      )) as {
-        subscription_id: string;
-        status: string;
-        company_name: string;
-        subscription_expires_at: Date | null;
-        email: string;
-        user_active: boolean;
-      }[];
-      const row = rows[0];
+      const row = await this.subscriptionRepository.findRenewalFailedContact(paypalSubscriptionId);
       if (!row || !row.user_active) return;
       if (row.status !== "past_due" && row.status !== "suspended") {
         logger.info(
@@ -137,16 +117,8 @@ export class NotificationService {
   }
 
   /** The owner's LOGIN email: that is the address that proved itself and gets billing mail. */
-  private async owner(companyId: string): Promise<OwnerRow | null> {
-    const rows = (await AppDataSource.query(
-      `SELECT c."name" AS "company_name", c."qr_token", c."deactivated_at",
-              u."email", u."is_active" AS "user_active"
-         FROM "companies" c
-         JOIN "users" u ON u."id" = c."owner_user_id"
-        WHERE c."id" = $1`,
-      [companyId],
-    )) as OwnerRow[];
-    const row = rows[0];
+  private async owner(companyId: string): Promise<OwnerContactRow | null> {
+    const row = await this.companyRepository.findOwnerContact(companyId);
     return row && row.user_active ? row : null;
   }
 

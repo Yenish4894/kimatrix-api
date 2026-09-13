@@ -11,6 +11,7 @@ import { NotificationService } from "@/services/NotificationService";
 import { BadRequestError, ConflictError, NotFoundError } from "@/errors/index";
 import type { Plan } from "@/entities/Plan";
 import { computeEntitlement } from "@/utils/entitlement";
+import type { TransactionRunner } from "@/utils/db";
 import { orderAmount, spinWindowClosed } from "@/utils/spinAddon";
 import {
   decideStuckCapture,
@@ -55,13 +56,16 @@ export interface CapturePaymentResult {
 }
 
 export class PaymentService {
-  private planRepository = new PlanRepository();
-  private paymentRepository = new PaymentRepository();
-  private companyRepository = new CompanyRepository();
-  private paypalService = new PaypalService();
-  private paypalWebhookService = new PaypalWebhookService();
-  private settingsService = new SettingsService();
-  private notificationService = new NotificationService();
+  constructor(
+    private readonly planRepository = new PlanRepository(),
+    private readonly paymentRepository = new PaymentRepository(),
+    private readonly companyRepository = new CompanyRepository(),
+    private readonly paypalService = new PaypalService(),
+    private readonly paypalWebhookService = new PaypalWebhookService(),
+    private readonly settingsService = new SettingsService(),
+    private readonly notificationService = new NotificationService(),
+    private readonly db: TransactionRunner = AppDataSource,
+  ) {}
 
   async getPlans(): Promise<PlanDto[]> {
     const plans = await this.planRepository.findAllActive();
@@ -150,20 +154,7 @@ export class PaymentService {
     // `companies.subscription_expires_at`. With a second plan stacked after this one that
     // is the end of the FUTURE plan: the window matched nothing, formed its own pool, and
     // spanned both plans.
-    const [current] = (await AppDataSource.query(
-      `SELECT p."plan_id" AS plan_id,
-              p."subscription_starts_at" AS starts_at,
-              p."subscription_ends_at" AS ends_at
-         FROM "payments" p
-        WHERE p."company_id" = $1
-          AND p."status" = 'captured'
-          AND p."kind" IN ('order', 'subscription_cycle')
-          AND p."subscription_starts_at" <= now()
-          AND p."subscription_ends_at" > now()
-        ORDER BY p."subscription_starts_at" DESC
-        LIMIT 1`,
-      [companyId],
-    )) as { plan_id: string; starts_at: Date; ends_at: Date }[];
+    const current = await this.paymentRepository.findCurrentPaidWindow(companyId);
     const company = await this.companyRepository.findById(companyId);
     if (!company || !current || !computeEntitlement(company, new Date()).hasAccess) {
       throw BadRequestError("You can add spins only while a paid plan is active.");
@@ -313,60 +304,58 @@ export class PaymentService {
     // other path already finalized) leaves it null, which is what makes the receipt
     // exactly-once across the synchronous capture, its retries, and the webhook.
     let receiptFor = null as { paymentId: string; companyId: string } | null;
-    const result = await AppDataSource.transaction(
-      async (manager): Promise<CapturePaymentResult> => {
-        const payment = await this.paymentRepository.findByIdForUpdate(paymentId, manager);
-        if (!payment) throw NotFoundError("Payment not found.");
+    const result = await this.db.transaction(async (manager): Promise<CapturePaymentResult> => {
+      const payment = await this.paymentRepository.findByIdForUpdate(paymentId, manager);
+      if (!payment) throw NotFoundError("Payment not found.");
 
-        // Re-check under the lock — the other path may have finalized while we waited.
-        if (payment.status === "captured") {
-          return {
-            paymentId: payment.id,
-            kind: payment.kind === "spin_addon" ? "spin_addon" : "order",
-            subscriptionStartsAt: payment.subscriptionStartsAt!,
-            subscriptionEndsAt: payment.subscriptionEndsAt!,
-          };
-        }
-
-        const now = new Date();
-        const dates =
-          payment.kind === "spin_addon"
-            ? {
-                subscriptionStartsAt: payment.subscriptionStartsAt!,
-                subscriptionEndsAt: payment.subscriptionEndsAt!,
-              }
-            : await this.companyRepository.extendSubscription(
-                {
-                  companyId: payment.company.id,
-                  planId: payment.plan.id,
-                  durationDays: payment.plan.durationDays,
-                  now,
-                },
-                manager,
-              );
-        const { subscriptionStartsAt, subscriptionEndsAt } = dates;
-
-        await this.paymentRepository.updateCaptured(
-          payment.id,
-          {
-            status: "captured",
-            capturedAt: now,
-            subscriptionStartsAt,
-            subscriptionEndsAt,
-            paypalResponse,
-          },
-          manager,
-        );
-
-        receiptFor = { paymentId: payment.id, companyId: payment.company.id };
+      // Re-check under the lock — the other path may have finalized while we waited.
+      if (payment.status === "captured") {
         return {
           paymentId: payment.id,
           kind: payment.kind === "spin_addon" ? "spin_addon" : "order",
+          subscriptionStartsAt: payment.subscriptionStartsAt!,
+          subscriptionEndsAt: payment.subscriptionEndsAt!,
+        };
+      }
+
+      const now = new Date();
+      const dates =
+        payment.kind === "spin_addon"
+          ? {
+              subscriptionStartsAt: payment.subscriptionStartsAt!,
+              subscriptionEndsAt: payment.subscriptionEndsAt!,
+            }
+          : await this.companyRepository.extendSubscription(
+              {
+                companyId: payment.company.id,
+                planId: payment.plan.id,
+                durationDays: payment.plan.durationDays,
+                now,
+              },
+              manager,
+            );
+      const { subscriptionStartsAt, subscriptionEndsAt } = dates;
+
+      await this.paymentRepository.updateCaptured(
+        payment.id,
+        {
+          status: "captured",
+          capturedAt: now,
           subscriptionStartsAt,
           subscriptionEndsAt,
-        };
-      },
-    );
+          paypalResponse,
+        },
+        manager,
+      );
+
+      receiptFor = { paymentId: payment.id, companyId: payment.company.id };
+      return {
+        paymentId: payment.id,
+        kind: payment.kind === "spin_addon" ? "spin_addon" : "order",
+        subscriptionStartsAt,
+        subscriptionEndsAt,
+      };
+    });
 
     // After commit, never awaited, never throws: an email problem must not turn a
     // captured payment into an error for the buyer or a 5xx for PayPal's webhook.

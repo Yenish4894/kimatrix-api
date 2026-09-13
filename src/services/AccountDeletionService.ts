@@ -1,11 +1,12 @@
 import type { EntityManager } from "typeorm";
 import { AppDataSource } from "data-source";
-import { Company } from "@/entities/Company";
 import { SubscriptionService } from "@/services/SubscriptionService";
+import { AccountDeletionRepository } from "@/repositories/AccountDeletionRepository";
+import { CompanyRepository } from "@/repositories/CompanyRepository";
+import { CustomerDataErasureRepository } from "@/repositories/CustomerDataErasureRepository";
 import { TokenRepository } from "@/repositories/TokenRepository";
-import { eraseCompanyCustomerData } from "@/services/customerDataErasure";
 import { BadRequestError, NotFoundError } from "@/errors/index";
-import { returningRows } from "@/utils/db";
+import type { TransactionRunner } from "@/utils/db";
 import { logger } from "@/utils/logger";
 
 /** How long a request sits before it is acted on. */
@@ -26,8 +27,14 @@ export interface PurgeResult {
 }
 
 export class AccountDeletionService {
-  private subscriptionService = new SubscriptionService();
-  private tokenRepository = new TokenRepository();
+  constructor(
+    private readonly subscriptionService = new SubscriptionService(),
+    private readonly tokenRepository = new TokenRepository(),
+    private readonly companyRepository = new CompanyRepository(),
+    private readonly deletionRepository = new AccountDeletionRepository(),
+    private readonly erasureRepository = new CustomerDataErasureRepository(),
+    private readonly db: TransactionRunner = AppDataSource,
+  ) {}
 
   /**
    * Records a deletion request and stops any further billing immediately.
@@ -38,9 +45,7 @@ export class AccountDeletionService {
    * untouched — so they keep working and can still export right up until the purge.
    */
   async requestDeletion(companyId: string, userId: string): Promise<DeletionStatus> {
-    const company = await AppDataSource.getRepository(Company).findOne({
-      where: { id: companyId },
-    });
+    const company = await this.companyRepository.findById(companyId);
     if (!company) throw NotFoundError("Company not found");
     if (company.anonymizedAt) throw BadRequestError("This account has already been closed.");
     if (company.deletionRequestedAt) return this.toStatus(company.deletionRequestedAt);
@@ -52,10 +57,7 @@ export class AccountDeletionService {
     });
 
     const now = new Date();
-    await AppDataSource.getRepository(Company).update(companyId, {
-      deletionRequestedAt: now,
-      deletionRequestedBy: { id: userId } as never,
-    });
+    await this.deletionRepository.markRequested(companyId, userId, now);
 
     logger.warn({ companyId, userId, purgeAt: this.purgeAt(now) }, "Account deletion requested");
     return this.toStatus(now);
@@ -69,25 +71,16 @@ export class AccountDeletionService {
    * the customer has to resubscribe, and the UI says so.
    */
   async cancelDeletion(companyId: string): Promise<void> {
-    const result = await AppDataSource.getRepository(Company)
-      .createQueryBuilder()
-      .update(Company)
-      .set({ deletionRequestedAt: null, deletionRequestedBy: null })
-      .where("id = :id", { id: companyId })
-      .andWhere("deletion_requested_at IS NOT NULL")
-      .andWhere("anonymized_at IS NULL")
-      .execute();
+    const affected = await this.deletionRepository.cancelRequest(companyId);
 
-    if ((result.affected ?? 0) === 0) {
+    if (affected === 0) {
       throw NotFoundError("There is no pending deletion request for this account.");
     }
     logger.info({ companyId }, "Account deletion request cancelled");
   }
 
   async getStatus(companyId: string): Promise<DeletionStatus> {
-    const company = await AppDataSource.getRepository(Company).findOne({
-      where: { id: companyId },
-    });
+    const company = await this.companyRepository.findById(companyId);
     return this.toStatus(company?.deletionRequestedAt ?? null);
   }
 
@@ -109,20 +102,10 @@ export class AccountDeletionService {
    * another free trial.
    */
   async purgeCompany(companyId: string): Promise<PurgeResult> {
-    return AppDataSource.transaction(async (manager) => {
+    return this.db.transaction(async (manager) => {
       // Lock the row so a concurrent cancelDeletion cannot slip in between the check
       // and the erasure.
-      const locked = returningRows<{
-        id: string;
-        deletion_requested_at: Date | null;
-        anonymized_at: Date | null;
-      }>(
-        await manager.query(
-          `SELECT "id", "deletion_requested_at", "anonymized_at"
-             FROM "companies" WHERE "id" = $1 FOR UPDATE`,
-          [companyId],
-        ),
-      )[0];
+      const locked = await this.deletionRepository.lockForPurge(companyId, manager);
       if (!locked) throw NotFoundError("Company not found");
       if (!locked.deletion_requested_at) {
         throw BadRequestError("This account has no pending deletion request.");
@@ -133,45 +116,17 @@ export class AccountDeletionService {
 
       // Third-party personal data. A closed account also loses the winner names on its
       // lucky-draw history: there is no company left to raise a prize dispute.
-      const erased = await eraseCompanyCustomerData(manager, companyId, {
+      const erased = await this.erasureRepository.eraseCompanyCustomerData(manager, companyId, {
         scrubDrawWinners: true,
       });
 
       // Scrub the company. `qr_token` is randomised rather than nulled so the column's
       // NOT NULL + UNIQUE hold and any printed QR code stops resolving to anything.
-      await manager.query(
-        `UPDATE "companies"
-            SET "name" = 'Closed account',
-                "street_address" = '', "city" = '', "state" = '', "postal_code" = NULL,
-                "registration_number" = 'DELETED-' || "id",
-                "contact_email" = 'deleted@invalid',
-                "contact_phone" = '',
-                "whatsapp_number" = NULL,
-                "qr_token" = 'deleted-' || replace("id"::text, '-', ''),
-                "is_active" = false,
-                "subscription_status" = 'deactivated',
-                "deactivated_at" = COALESCE("deactivated_at", now()),
-                "anonymized_at" = now()
-          WHERE "id" = $1`,
-        [companyId],
-      );
+      await this.deletionRepository.anonymizeCompany(companyId, manager);
 
       // Scrub the owner. The password is set to a value bcrypt can never produce, so
       // the account cannot be logged into even if a hash were somehow guessed.
-      const ownerRows = returningRows<{ id: string }>(
-        await manager.query(
-          `UPDATE "users" u
-              SET "email" = 'deleted+' || u."id" || '@invalid',
-                  "username" = 'deleted_' || replace(u."id"::text, '-', ''),
-                  "password" = 'ACCOUNT_DELETED',
-                  "is_active" = false,
-                  "email_verified_at" = NULL
-             FROM "companies" c
-            WHERE c."id" = $1 AND u."id" = c."owner_user_id"
-        RETURNING u."id"`,
-          [companyId],
-        ),
-      );
+      const ownerRows = await this.deletionRepository.scrubOwner(companyId, manager);
 
       // Kill every session. Without this an open tab keeps working against an account
       // that no longer exists, on an access token that stays valid until it expires.
@@ -188,14 +143,7 @@ export class AccountDeletionService {
   /** Companies whose grace period has elapsed. */
   async findDue(now: Date): Promise<string[]> {
     const cutoff = new Date(now.getTime() - DELETION_GRACE_DAYS * 86_400_000);
-    const rows = (await AppDataSource.query(
-      `SELECT "id" FROM "companies"
-        WHERE "deletion_requested_at" IS NOT NULL
-          AND "deletion_requested_at" <= $1
-          AND "anonymized_at" IS NULL`,
-      [cutoff],
-    )) as { id: string }[];
-    return rows.map((r) => r.id);
+    return this.deletionRepository.findDue(cutoff);
   }
 
   private purgeAt(requestedAt: Date): Date {

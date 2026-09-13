@@ -17,6 +17,14 @@ import { generateRandomToken } from "@/utils/crypto";
 import { assertEmailsDeliverable } from "@/utils/emailDeliverability";
 import { TokenRepository } from "@/repositories/TokenRepository";
 import { emailDomainForLog } from "@/utils/redact";
+import { getRedisClient } from "@/config/redis.client";
+import { emailQueue } from "@/queues/email.queue";
+import {
+  runRegistration,
+  sendRegistrationAttemptNotice,
+  type ExistingAccount,
+  type RegistrationAccepted,
+} from "@/utils/registrationFlow";
 import type {
   LoginInput,
   PasswordChangeInput,
@@ -43,46 +51,13 @@ export interface LoginResult {
   tokens: IssuedTokens;
 }
 
-export interface RegisterCompanyResult {
-  user: Pick<User, "id" | "email" | "username" | "userType" | "isActive">;
-  company: Pick<
-    Company,
-    | "id"
-    | "name"
-    | "streetAddress"
-    | "city"
-    | "state"
-    | "country"
-    | "postalCode"
-    | "registrationNumber"
-    | "contactEmail"
-    | "contactPhone"
-    | "whatsappNumber"
-    | "businessType"
-    | "promoEmailOptIn"
-    | "isActive"
-    | "joinedAt"
-    | "qrToken"
-  >;
-  companyId: string;
-  companyIsActive: boolean;
-  /** False until the verification link is clicked. The trial clock starts on verify. */
-  emailVerified: boolean;
-  trial: {
-    /**
-     * Advisory. The authoritative decision is made when the verification link is
-     * clicked, so this can go from true to false if another registration claims the
-     * same identifier in between.
-     *
-     * Deliberately does NOT say which identifier matched — this is an
-     * unauthenticated endpoint, and naming the field would turn it into an
-     * enumeration oracle over every email and phone number we hold.
-     */
-    eligible: boolean;
-    durationDays: number;
-  };
-  tokens: IssuedTokens;
-}
+/**
+ * The whole success payload of public registration: `{ status: "check_email" }`, and
+ * nothing else — no session, no profile, no trial hint. It is identical whether an
+ * account was created or the login email already had one (audit SEC-2/3); see
+ * utils/registrationFlow.ts.
+ */
+export type RegisterCompanyResult = RegistrationAccepted;
 
 export interface RefreshResult {
   user: Pick<User, "id" | "email" | "username" | "userType" | "isActive">;
@@ -124,131 +99,146 @@ export class AuthService {
   private emailService = new EmailService();
   private notificationService = new NotificationService();
 
+  /**
+   * Public self-registration. Does NOT sign the user in: they confirm their email and
+   * then log in (an unverified login is allowed, as before).
+   *
+   * If the login email already has an account, nothing is created and the caller gets
+   * exactly the same answer as a successful signup; the account's owner is emailed
+   * instead. Username and registration-number conflicts are still reported (they are
+   * not personal data), and are decided independently of the email — see
+   * runRegistration for why the ordering matters.
+   *
+   * Timing: both paths pay for the deliverability checks, the bcrypt hash and one
+   * transaction with the same lookups. Only a new account adds two INSERTs; all mail
+   * work (verification link, existing-account notice, the Redis dedupe) happens after
+   * the response and is not awaited.
+   */
   async registerCompany(
     input: RegisterCompanyInput,
     context: RegisterCompanyContext,
-    outerManager?: EntityManager,
   ): Promise<RegisterCompanyResult> {
     const email = input.email.trim().toLowerCase();
     const username = input.username.trim();
 
     // First, before the password hash, the transaction and the verification token: an
     // address that fails here must never have anything sent to it. Both are checked
-    // because both receive mail from us.
+    // because both receive mail from us. These errors say nothing about whether an
+    // account exists, so they may stay specific.
     await assertEmailsDeliverable([
       { field: "email", value: email },
       { field: "contactEmail", value: input.contactEmail },
     ]);
 
+    // Hashed on every path, taken email included, so the dominant cost is the same.
     const passwordHash = await this.passwordService.hash(input.password);
 
-    const run = async (manager: EntityManager): Promise<RegisterCompanyResult> => {
-      await this.assertUniqueIdentifiers(email, username, input.registrationNumber, manager);
-      const now = new Date();
+    return runRegistration<EntityManager>({
+      transaction: (work) => AppDataSource.transaction(work),
+      assertOtherIdentifiersFree: (manager) =>
+        this.assertOtherIdentifiersFree(username, input.registrationNumber, manager),
+      findAccountByEmail: (manager) => this.userRepository.findByEmail(email, manager),
+      insertAccount: (manager) =>
+        this.insertRegisteredCompany(input, email, username, passwordHash, manager),
+      // After commit, never inside the transaction: a rolled-back signup must not get a
+      // "confirm your email" message, and a Redis outage must not fail the signup.
+      sendVerification: (userId) => this.requestEmailVerification(userId, context),
+      notifyExistingAccount: (account) => this.notifyRegistrationAttempt(account),
+      logError: (err, message) => logger.error({ err }, message),
+    });
+  }
 
-      const user = await this.userRepository.create(
-        {
-          email,
-          username,
-          password: passwordHash,
-          userType: "company",
-          isActive: true,
-          passwordChangedAt: now,
-        },
-        manager,
-      );
+  private async insertRegisteredCompany(
+    input: RegisterCompanyInput,
+    email: string,
+    username: string,
+    passwordHash: string,
+    manager: EntityManager,
+  ): Promise<{ userId: string }> {
+    const now = new Date();
 
-      const company = await this.companyRepository.create(
-        {
-          owner: user,
-          name: input.name,
-          streetAddress: input.streetAddress,
-          city: input.city,
-          state: input.state,
-          country: input.country,
-          postalCode: input.postalCode || null,
-          registrationNumber: input.registrationNumber,
-          contactEmail: input.contactEmail,
-          contactPhone: input.contactPhone,
-          whatsappNumber: input.whatsappNumber ?? null,
-          businessType: input.businessType,
-          promoEmailOptIn: input.promoEmailOptIn,
-          termsAcceptedAt: now,
-          isActive: false,
-          joinedAt: now,
-          qrToken: generateRandomToken(24),
-        },
-        manager,
-      );
+    const user = await this.userRepository.create(
+      {
+        email,
+        username,
+        password: passwordHash,
+        userType: "company",
+        isActive: true,
+        passwordChangedAt: now,
+      },
+      manager,
+    );
 
-      logger.info(
-        { userId: user.id, companyId: company.id },
-        "Company registered (pending activation)",
-      );
+    const company = await this.companyRepository.create(
+      {
+        owner: user,
+        name: input.name,
+        streetAddress: input.streetAddress,
+        city: input.city,
+        state: input.state,
+        country: input.country,
+        postalCode: input.postalCode || null,
+        registrationNumber: input.registrationNumber,
+        contactEmail: input.contactEmail,
+        contactPhone: input.contactPhone,
+        whatsappNumber: input.whatsappNumber ?? null,
+        businessType: input.businessType,
+        promoEmailOptIn: input.promoEmailOptIn,
+        termsAcceptedAt: now,
+        isActive: false,
+        joinedAt: now,
+        qrToken: generateRandomToken(24),
+      },
+      manager,
+    );
 
-      // Auto-login: issue a session so the user can immediately start the
-      // subscription payment in the same flow (no separate manual login step).
-      const tokens = await this.tokenService.issueTokens(user, company.id, context, manager);
+    logger.info(
+      { userId: user.id, companyId: company.id },
+      "Company registered (pending activation)",
+    );
 
-      // Read-only probe so the success screen can say "your 7-day trial starts when
-      // you confirm your email" rather than promising something we will refuse. The
-      // identifiers are NOT claimed here — see confirmEmailVerification.
-      const trialEligible = await this.trialIdentityService.isEligible(
-        {
-          loginEmail: email,
-          contactEmail: input.contactEmail,
-          contactPhone: input.contactPhone,
-        },
-        manager,
-      );
-      const trialDurationDays = await this.settingsService.getTrialDurationDays(manager);
+    // No session is issued and no trial-eligibility hint is returned: either would
+    // make this answer differ from the taken-email one. The trial is still decided
+    // (and the identifiers claimed) at verification — see confirmEmailVerification.
+    return { userId: user.id };
+  }
 
-      return {
-        user: {
-          id: user.id,
-          email: user.email,
-          username: user.username,
-          userType: user.userType,
-          isActive: user.isActive,
-        },
-        company: {
-          id: company.id,
-          name: company.name,
-          streetAddress: company.streetAddress,
-          city: company.city,
-          state: company.state,
-          country: company.country,
-          postalCode: company.postalCode,
-          registrationNumber: company.registrationNumber,
-          contactEmail: company.contactEmail,
-          contactPhone: company.contactPhone,
-          whatsappNumber: company.whatsappNumber,
-          businessType: company.businessType,
-          promoEmailOptIn: company.promoEmailOptIn,
-          isActive: company.isActive,
-          joinedAt: company.joinedAt,
-          qrToken: company.qrToken,
-        },
-        companyId: company.id,
-        companyIsActive: company.isActive,
-        emailVerified: user.emailVerifiedAt != null,
-        trial: { eligible: trialEligible, durationDays: trialDurationDays },
-        tokens,
-      };
-    };
-
-    // A caller supplying its own manager owns the commit, so it also owns sending the
-    // verification mail — we cannot enqueue against rows it hasn't committed yet.
-    if (outerManager) return run(outerManager);
-
-    const result = await AppDataSource.transaction(run);
-
-    // Deliberately after commit. Enqueuing inside the transaction would send a
-    // "welcome, confirm your email" message for a registration that then rolled back,
-    // and would let a Redis outage fail an otherwise-valid signup.
-    await this.requestEmailVerification(result.user.id, context);
-
-    return result;
+  /**
+   * Someone submitted the registration form with this account's login email. Tell the
+   * owner, at most once an hour per address (sendRegistrationAttemptNotice).
+   *
+   * Enqueued straight onto the shared queue's existing `generic` job rather than via
+   * EmailService.enqueueRenderedEmail, whose log line carries the full recipient
+   * address. Logs here carry the user id and the domain only.
+   */
+  private async notifyRegistrationAttempt(account: ExistingAccount): Promise<void> {
+    const redis = getRedisClient();
+    const outcome = await sendRegistrationAttemptNotice(account, {
+      claimOnce: async (key, ttlSeconds) =>
+        (await redis.set(key, "1", "EX", ttlSeconds, "NX")) === "OK",
+      release: async (key) => {
+        await redis.del(key);
+      },
+      enqueue: async (to, rendered) => {
+        await emailQueue.add(
+          "generic",
+          {
+            type: "generic",
+            to,
+            subject: rendered.subject,
+            html: rendered.html,
+            text: rendered.text,
+          },
+          // No colons (see EmailService.enqueuePasswordReset); the user id, not the address.
+          { jobId: `regattempt-${account.id}-${Date.now()}` },
+        );
+      },
+      frontendBaseUrl: config.FRONTEND_BASE_URL,
+    });
+    logger.info(
+      { userId: account.id, emailDomain: emailDomainForLog(account.email), outcome },
+      "Registration attempted with an existing login email",
+    );
   }
 
   async login(input: LoginInput, context: LoginContext): Promise<LoginResult> {
@@ -719,29 +709,22 @@ export class AuthService {
     return this.userRepository.findByUsernameWithPassword(username);
   }
 
-  private async assertUniqueIdentifiers(
-    email: string,
+  /**
+   * Username and registration number only. The login email is deliberately NOT checked
+   * here: a taken address is answered with the neutral success response, never with an
+   * error (registerCompany / runRegistration).
+   */
+  private async assertOtherIdentifiersFree(
     username: string,
     registrationNumber: string,
     manager?: EntityManager,
   ): Promise<void> {
-    const [emailTaken, usernameTaken, regTaken] = await Promise.all([
-      this.userRepository.findByEmail(email, manager),
+    const [usernameTaken, regTaken] = await Promise.all([
       this.userRepository.findByUsername(username, manager),
       this.companyRepository.findByRegistrationNumber(registrationNumber, manager),
     ]);
 
     const details = [];
-    // Worded so it does not assert that an account exists. It cannot hide the conflict
-    // altogether: registration signs the new account straight in, so a taken address
-    // has to be refused visibly. What bounds using this as an oracle over our customer
-    // list is registerLimiter (5 an hour per IP) and Turnstile, not the wording.
-    if (emailTaken)
-      details.push({
-        field: "email",
-        message:
-          "This email can't be used to register. If you already have an account, log in or reset your password.",
-      });
     if (usernameTaken)
       details.push({
         field: "username",

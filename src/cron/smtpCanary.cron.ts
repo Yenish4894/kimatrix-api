@@ -3,6 +3,7 @@ import { AppDataSource } from "data-source";
 import { config } from "@/config/index";
 import { fromAddress, sendMail, smtpSecrets } from "@/config/mailer";
 import { runExclusive } from "@/cron/runTracker";
+import { AdvisoryLockRepository } from "@/repositories/AdvisoryLockRepository";
 import { recordSmtpOutcome } from "@/services/SmtpHealthStore";
 import { failureOutcome, successOutcome, type SmtpSendOutcome } from "@/utils/smtpHealth";
 import { withTimeout } from "@/utils/withTimeout";
@@ -27,7 +28,7 @@ import { logger } from "@/utils/logger";
 const SCHEDULE = "17 * * * *";
 
 /** Distinct from every other cron's key. */
-const ADVISORY_LOCK_KEY = 4_820_119;
+const ADVISORY_LOCK_KEY = 4_820_120;
 
 /** Past this we stop waiting and record a timeout; Hostinger normally answers in ~1s. */
 const SEND_TIMEOUT_MS = 30_000;
@@ -49,12 +50,11 @@ export async function sendSmtpCanary(now = new Date()): Promise<SmtpSendOutcome 
 
   // Session-level lock on a pinned connection, as in the purge crons: lock and unlock
   // through the pool can land on different connections and leak the lock.
+  const locks = new AdvisoryLockRepository();
   const lockRunner = AppDataSource.createQueryRunner();
   await lockRunner.connect();
   try {
-    const [{ locked }] = (await lockRunner.query(`SELECT pg_try_advisory_lock($1) AS locked`, [
-      ADVISORY_LOCK_KEY,
-    ])) as [{ locked: boolean }];
+    const locked = await locks.trySessionLock(lockRunner, ADVISORY_LOCK_KEY);
     if (!locked) {
       logger.debug("SMTP canary skipped — another instance holds the lock");
       return null;
@@ -62,7 +62,7 @@ export async function sendSmtpCanary(now = new Date()): Promise<SmtpSendOutcome 
     try {
       return await sendOnce(to, now);
     } finally {
-      await lockRunner.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]);
+      await locks.sessionUnlock(lockRunner, ADVISORY_LOCK_KEY);
     }
   } finally {
     await lockRunner.release();

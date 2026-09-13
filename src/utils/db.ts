@@ -1,3 +1,14 @@
+import type { EntityManager } from "typeorm";
+
+/**
+ * The one thing services need from `AppDataSource`: running a callback in a
+ * transaction. Services take it as a constructor default (`db = AppDataSource`) so a
+ * unit test can pass `{ transaction: (fn) => fn(fakeManager) }` instead of a database.
+ */
+export interface TransactionRunner {
+  transaction<T>(runInTransaction: (manager: EntityManager) => Promise<T>): Promise<T>;
+}
+
 /**
  * Unwraps the rows from a raw `UPDATE|INSERT|DELETE ... RETURNING` run through
  * TypeORM's `query()`.

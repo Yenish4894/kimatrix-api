@@ -2,6 +2,7 @@ import cron, { type ScheduledTask } from "node-cron";
 import { AppDataSource } from "data-source";
 import { EXPIRY_RETENTION_DAYS } from "@/config/retention";
 import { config } from "@/config/index";
+import { AdvisoryLockRepository } from "@/repositories/AdvisoryLockRepository";
 import { ExpiredDataPurgeService } from "@/services/ExpiredDataPurgeService";
 import { logger } from "@/utils/logger";
 import { runExclusive } from "@/cron/runTracker";
@@ -25,6 +26,7 @@ let task: ScheduledTask | null = null;
 
 export async function purgeExpiredCompanyData(): Promise<number> {
   const service = new ExpiredDataPurgeService();
+  const locks = new AdvisoryLockRepository();
 
   // One instance at a time. Two concurrent runs would race on the same rows, and
   // while the locked re-check inside `purge` makes that safe, doing the work twice is
@@ -38,9 +40,7 @@ export async function purgeExpiredCompanyData(): Promise<number> {
   const lockRunner = AppDataSource.createQueryRunner();
   await lockRunner.connect();
   try {
-    const [{ locked }] = (await lockRunner.query(`SELECT pg_try_advisory_lock($1) AS locked`, [
-      ADVISORY_LOCK_KEY,
-    ])) as [{ locked: boolean }];
+    const locked = await locks.trySessionLock(lockRunner, ADVISORY_LOCK_KEY);
     if (!locked) return 0;
 
     try {
@@ -48,7 +48,7 @@ export async function purgeExpiredCompanyData(): Promise<number> {
     } finally {
       // Same session as the lock, so this can only fail if the connection itself died
       // — and then Postgres has already dropped the lock with the session.
-      await lockRunner.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY]);
+      await locks.sessionUnlock(lockRunner, ADVISORY_LOCK_KEY);
     }
   } finally {
     await lockRunner.release();

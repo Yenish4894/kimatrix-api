@@ -1,5 +1,6 @@
 import cron, { type ScheduledTask } from "node-cron";
 import { AppDataSource } from "data-source";
+import { AdvisoryLockRepository } from "@/repositories/AdvisoryLockRepository";
 import { PaymentService } from "@/services/PaymentService";
 import { logger } from "@/utils/logger";
 import { runExclusive } from "@/cron/runTracker";
@@ -31,12 +32,11 @@ let task: ScheduledTask | null = null;
 export async function reconcileStuckPayments(): Promise<Awaited<
   ReturnType<PaymentService["reconcileStuckCaptures"]>
 > | null> {
+  const locks = new AdvisoryLockRepository();
   const runner = AppDataSource.createQueryRunner();
   await runner.connect();
   try {
-    const [{ locked }] = (await runner.query("SELECT pg_try_advisory_lock($1) AS locked", [
-      ADVISORY_LOCK_KEY,
-    ])) as [{ locked: boolean }];
+    const locked = await locks.trySessionLock(runner, ADVISORY_LOCK_KEY);
     if (!locked) {
       logger.debug("Payment reconcile skipped — another instance holds the lock");
       return null;
@@ -44,7 +44,7 @@ export async function reconcileStuckPayments(): Promise<Awaited<
     try {
       return await new PaymentService().reconcileStuckCaptures();
     } finally {
-      await runner.query("SELECT pg_advisory_unlock($1)", [ADVISORY_LOCK_KEY]);
+      await locks.sessionUnlock(runner, ADVISORY_LOCK_KEY);
     }
   } finally {
     await runner.release();

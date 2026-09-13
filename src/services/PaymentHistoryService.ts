@@ -76,7 +76,7 @@ export function toHistoryItem(row: PaymentHistoryRow): PaymentHistoryItem {
 }
 
 export class PaymentHistoryService {
-  private paymentRepository = new PaymentRepository();
+  constructor(private readonly paymentRepository = new PaymentRepository()) {}
 
   async listForCompany(
     companyId: string,

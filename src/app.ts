@@ -3,8 +3,8 @@ import express, { type Express } from "express";
 import helmet from "helmet";
 import cors from "cors";
 import { config } from "@/config/index";
-import { AppDataSource } from "data-source";
 import { pingRedis } from "@/config/redis.client";
+import { DatabaseHealthRepository } from "@/repositories/DatabaseHealthRepository";
 import { errorHandler } from "@/middleware/errorHandler";
 import { httpLogger } from "@/middleware/httpLogger";
 import { globalApiLimiter } from "@/middleware/rateLimit";
@@ -13,6 +13,7 @@ import routes from "@/routes/index";
 import metricsRoutes from "@/routes/metrics.route";
 
 const app: Express = express();
+const databaseHealth = new DatabaseHealthRepository();
 
 app.set("trust proxy", 1);
 
@@ -57,7 +58,7 @@ app.get("/ready", async (req, res) => {
   let overallOk = true;
 
   try {
-    await AppDataSource.query("SELECT 1");
+    await databaseHealth.ping();
     checks.database = "ok";
   } catch (err) {
     overallOk = false;

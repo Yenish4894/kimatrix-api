@@ -2,8 +2,11 @@ import type { EntityManager } from "typeorm";
 import { AppDataSource } from "data-source";
 import { SubscriptionService } from "@/services/SubscriptionService";
 import { PaypalService } from "@/services/PaypalService";
+import { AuditLogRepository } from "@/repositories/AuditLogRepository";
+import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { PaymentRepository } from "@/repositories/PaymentRepository";
-import { returningRows } from "@/utils/db";
+import { PaypalWebhookEventRepository } from "@/repositories/PaypalWebhookEventRepository";
+import type { TransactionRunner } from "@/utils/db";
 import { logger } from "@/utils/logger";
 import { classifyReversal, reversalRefs, type ReversalEventType } from "@/utils/paypalBilling";
 import { NotificationService, type RefundNotice } from "@/services/NotificationService";
@@ -42,10 +45,16 @@ interface WebhookEvent {
  *    never sent again — which is how a payment silently goes uncredited.
  */
 export class PaypalWebhookService {
-  private subscriptionService = new SubscriptionService();
-  private paypalService = new PaypalService();
-  private paymentRepository = new PaymentRepository();
-  private notificationService = new NotificationService();
+  constructor(
+    private readonly subscriptionService = new SubscriptionService(),
+    private readonly paypalService = new PaypalService(),
+    private readonly paymentRepository = new PaymentRepository(),
+    private readonly notificationService = new NotificationService(),
+    private readonly webhookEventRepository = new PaypalWebhookEventRepository(),
+    private readonly companyRepository = new CompanyRepository(),
+    private readonly auditLogRepository = new AuditLogRepository(),
+    private readonly db: TransactionRunner = AppDataSource,
+  ) {}
 
   /**
    * @returns false when the event was a duplicate or is of no interest to us.
@@ -63,17 +72,14 @@ export class PaypalWebhookService {
     const createTime = event.create_time ? new Date(event.create_time) : null;
 
     // Insert-first. This is the idempotency guarantee.
-    const claimed = returningRows<{ id: string }>(
-      await AppDataSource.query(
-        `INSERT INTO "paypal_webhook_events"
-           ("event_id", "event_type", "resource_id", "create_time", "payload")
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT ("event_id") DO NOTHING
-         RETURNING "id"`,
-        [eventId, eventType, resourceId, createTime, JSON.stringify(event)],
-      ),
-    );
-    if (claimed.length === 0) {
+    const claimed = await this.webhookEventRepository.claim({
+      eventId,
+      eventType,
+      resourceId,
+      createTime,
+      payload: JSON.stringify(event),
+    });
+    if (!claimed) {
       logger.info({ eventId, eventType }, "Duplicate webhook — already processed");
       return false;
     }
@@ -88,9 +94,7 @@ export class PaypalWebhookService {
       // retry look like a duplicate and get skipped, losing the event permanently.
       // The controller answers 5xx on this throw so PayPal does retry; deleting the
       // row is what lets that retry actually do something.
-      await AppDataSource.query(`DELETE FROM "paypal_webhook_events" WHERE "event_id" = $1`, [
-        eventId,
-      ]).catch((cleanupErr: unknown) => {
+      await this.webhookEventRepository.release(eventId).catch((cleanupErr: unknown) => {
         logger.error(
           { err: cleanupErr, eventId },
           "Failed to release a webhook claim — PayPal's retry will be treated as a duplicate",
@@ -99,10 +103,7 @@ export class PaypalWebhookService {
       throw err;
     }
 
-    await AppDataSource.query(
-      `UPDATE "paypal_webhook_events" SET "processed_at" = now() WHERE "event_id" = $1`,
-      [eventId],
-    );
+    await this.webhookEventRepository.markProcessed(eventId);
     return true;
   }
 
@@ -230,7 +231,7 @@ export class PaypalWebhookService {
 
     // Decided inside the transaction, sent after it commits (see the end of this method).
     let notice = null as RefundNotice | null;
-    await AppDataSource.transaction(async (manager) => {
+    await this.db.transaction(async (manager) => {
       const payment = await this.paymentRepository.findForReversalForUpdate(refs, manager);
       if (!payment) {
         // Not thrown: no retry will ever make an unknown capture known, and throwing
@@ -255,9 +256,6 @@ export class PaypalWebhookService {
       };
       // Appended rather than overwriting `paypal_response`: the capture body is how a
       // later reversal event finds this row by capture id.
-      const appendEntrySql = `COALESCE("paypal_response", '{}'::jsonb)
-        || jsonb_build_object('reversals',
-             COALESCE("paypal_response"->'reversals', '[]'::jsonb) || $2::jsonb)`;
 
       if (extent === "partial") {
         const seen = Array.isArray(payment.paypal_response?.["reversals"])
@@ -266,9 +264,10 @@ export class PaypalWebhookService {
             )
           : false;
         if (seen) return;
-        await manager.query(
-          `UPDATE "payments" SET "paypal_response" = ${appendEntrySql} WHERE "id" = $1`,
-          [payment.id, JSON.stringify([entry])],
+        await this.paymentRepository.appendReversalEntry(
+          payment.id,
+          JSON.stringify([entry]),
+          manager,
         );
         await this.audit(manager, "payment.partial_refund", payment.id, {
           before: { status: payment.status },
@@ -295,11 +294,11 @@ export class PaypalWebhookService {
       const wasCaptured = payment.status === "captured";
       const newStatus =
         !wasCaptured && eventType === "PAYMENT.CAPTURE.DENIED" ? "failed" : "refunded";
-      await manager.query(
-        `UPDATE "payments"
-            SET "status" = $3, "paypal_response" = ${appendEntrySql}, "updated_at" = now()
-          WHERE "id" = $1`,
-        [payment.id, JSON.stringify([entry]), newStatus],
+      await this.paymentRepository.markReversed(
+        payment.id,
+        JSON.stringify([entry]),
+        newStatus,
+        manager,
       );
 
       // Take back exactly the window this order added. Only an `order` grants access
@@ -314,23 +313,16 @@ export class PaypalWebhookService {
         payment.subscription_starts_at &&
         payment.subscription_ends_at
       ) {
-        const locked = returningRows<{ subscription_expires_at: Date | null }>(
-          await manager.query(
-            `SELECT "subscription_expires_at" FROM "companies" WHERE "id" = $1 FOR UPDATE`,
-            [payment.company_id],
-          ),
-        )[0];
-        const updated = returningRows<{ subscription_expires_at: Date | null }>(
-          await manager.query(
-            `UPDATE "companies"
-                SET "subscription_expires_at" =
-                      "subscription_expires_at" - ($3::timestamptz - $2::timestamptz),
-                    "subscription_ended_notice_for" = NULL
-              WHERE "id" = $1 AND "subscription_expires_at" IS NOT NULL
-              RETURNING "subscription_expires_at"`,
-            [payment.company_id, payment.subscription_starts_at, payment.subscription_ends_at],
-          ),
-        )[0];
+        const locked = await this.companyRepository.lockSubscriptionExpiry(
+          payment.company_id,
+          manager,
+        );
+        const updated = await this.companyRepository.subtractPaidWindow(
+          payment.company_id,
+          payment.subscription_starts_at,
+          payment.subscription_ends_at,
+          manager,
+        );
         access = {
           before: locked?.subscription_expires_at ?? null,
           after: updated?.subscription_expires_at ?? null,
@@ -403,19 +395,13 @@ export class PaypalWebhookService {
     paymentId: string,
     data: { before: Record<string, unknown>; after: Record<string, unknown>; note: string },
   ): Promise<void> {
-    await manager.query(
-      `INSERT INTO "admin_audit_log"
-         ("actor_user_id", "actor_email", "action", "entity_type", "entity_id",
-          "before", "after", "note")
-       VALUES (NULL, $1, $2, 'payment', $3, $4, $5, $6)`,
-      [
-        SYSTEM_ACTOR_EMAIL,
-        action,
-        paymentId,
-        JSON.stringify(data.before),
-        JSON.stringify(data.after),
-        data.note.slice(0, 255),
-      ],
-    );
+    await this.auditLogRepository.insertSystemPaymentEntry(manager, {
+      actorEmail: SYSTEM_ACTOR_EMAIL,
+      action,
+      paymentId,
+      before: data.before,
+      after: data.after,
+      note: data.note.slice(0, 255),
+    });
   }
 }

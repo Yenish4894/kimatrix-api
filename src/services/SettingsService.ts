@@ -74,8 +74,10 @@ const CURRENCY_PATTERN = /^[A-Z]{3}$/;
  * trial length, and `trial_ends_at` is stamped once so nothing shifts underneath them.
  */
 export class SettingsService {
-  private appSettingRepository = new AppSettingRepository();
-  private auditService = new AuditService();
+  constructor(
+    private readonly appSettingRepository = new AppSettingRepository(),
+    private readonly auditService = new AuditService(),
+  ) {}
 
   private static cache: PlatformSettings | null = null;
   private static cachedAt = 0;

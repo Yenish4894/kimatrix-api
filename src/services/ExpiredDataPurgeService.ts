@@ -1,17 +1,14 @@
 import { AppDataSource } from "data-source";
 import { EXPIRY_RETENTION_DAYS } from "@/config/retention";
-import { eraseCompanyCustomerData } from "@/services/customerDataErasure";
+import { CustomerDataErasureRepository } from "@/repositories/CustomerDataErasureRepository";
+import {
+  ExpiredDataPurgeRepository,
+  type PurgeCandidate,
+} from "@/repositories/ExpiredDataPurgeRepository";
+import type { TransactionRunner } from "@/utils/db";
 import { logger } from "@/utils/logger";
 
-export interface PurgeCandidate {
-  id: string;
-  name: string;
-  owner_email: string;
-  access_ended_at: Date;
-  days_expired: number;
-  customers: number;
-  purchases: number;
-}
+export type { PurgeCandidate };
 
 export interface ExpiredPurgeResult {
   companyId: string;
@@ -35,6 +32,12 @@ export interface ExpiredPurgeResult {
  * can be inspected before anything is deleted.
  */
 export class ExpiredDataPurgeService {
+  constructor(
+    private readonly purgeRepository = new ExpiredDataPurgeRepository(),
+    private readonly erasureRepository = new CustomerDataErasureRepository(),
+    private readonly db: TransactionRunner = AppDataSource,
+  ) {}
+
   /**
    * Companies whose retention window has fully elapsed.
    *
@@ -44,41 +47,7 @@ export class ExpiredDataPurgeService {
    * trial date.
    */
   async findDue(now = new Date()): Promise<PurgeCandidate[]> {
-    return (await AppDataSource.manager.query(
-      `SELECT c."id",
-              c."name",
-              u."email" AS owner_email,
-              GREATEST(
-                COALESCE(c."trial_ends_at",            'epoch'::timestamptz),
-                COALESCE(c."subscription_expires_at",  'epoch'::timestamptz)
-              ) AS access_ended_at,
-              EXTRACT(DAY FROM $2::timestamptz - GREATEST(
-                COALESCE(c."trial_ends_at",           'epoch'::timestamptz),
-                COALESCE(c."subscription_expires_at", 'epoch'::timestamptz)
-              ))::int AS days_expired,
-              (SELECT count(*) FROM "customers" x
-                WHERE x."company_id" = c."id" AND x."deleted_at" IS NULL)::int AS customers,
-              (SELECT count(*) FROM "purchases" p
-                WHERE p."company_id" = c."id" AND p."deleted_at" IS NULL)::int AS purchases
-         FROM "companies" c
-         JOIN "users" u ON u."id" = c."owner_user_id"
-        WHERE c."deleted_at" IS NULL
-          -- Never collected, or already erased: nothing to do either way.
-          AND c."data_purged_at" IS NULL
-          AND c."anonymized_at" IS NULL
-          -- An admin comp is an explicit decision to keep them running.
-          AND c."is_comped" = false
-          -- Must have actually had access at some point. A company that registered and
-          -- never started a trial has no expiry date to count from.
-          AND (c."trial_ends_at" IS NOT NULL OR c."subscription_expires_at" IS NOT NULL)
-          -- The window, measured from whichever access ended last.
-          AND GREATEST(
-                COALESCE(c."trial_ends_at",           'epoch'::timestamptz),
-                COALESCE(c."subscription_expires_at", 'epoch'::timestamptz)
-              ) <= $2::timestamptz - make_interval(days => $1::int)
-        ORDER BY access_ended_at`,
-      [EXPIRY_RETENTION_DAYS, now],
-    )) as PurgeCandidate[];
+    return this.purgeRepository.findDue(EXPIRY_RETENTION_DAYS, now);
   }
 
   /**
@@ -90,27 +59,8 @@ export class ExpiredDataPurgeService {
    * this whole design exists to avoid.
    */
   async purge(companyId: string, now = new Date()): Promise<ExpiredPurgeResult | null> {
-    return AppDataSource.transaction(async (manager) => {
-      const locked = (await manager.query(
-        `SELECT c."id", c."name", c."data_purged_at", c."anonymized_at", c."is_comped",
-                GREATEST(
-                  COALESCE(c."trial_ends_at",           'epoch'::timestamptz),
-                  COALESCE(c."subscription_expires_at", 'epoch'::timestamptz)
-                ) AS access_ended_at
-           FROM "companies" c
-          WHERE c."id" = $1 AND c."deleted_at" IS NULL
-            FOR UPDATE`,
-        [companyId],
-      )) as {
-        id: string;
-        name: string;
-        data_purged_at: Date | null;
-        anonymized_at: Date | null;
-        is_comped: boolean;
-        access_ended_at: Date;
-      }[];
-
-      const company = locked[0];
+    return this.db.transaction(async (manager) => {
+      const company = await this.purgeRepository.lockCompany(companyId, manager);
       if (!company) return null;
 
       const cutoff = new Date(now.getTime() - EXPIRY_RETENTION_DAYS * 86_400_000);
@@ -127,15 +77,12 @@ export class ExpiredDataPurgeService {
 
       // The lucky-draw history keeps its winner snapshot: the account lives on, and a
       // prize dispute can still be raised about a draw it ran.
-      const erased = await eraseCompanyCustomerData(manager, companyId, {
+      const erased = await this.erasureRepository.eraseCompanyCustomerData(manager, companyId, {
         scrubDrawWinners: false,
       });
 
       // The account itself is untouched. They can log in, subscribe, and start again.
-      await manager.query(`UPDATE "companies" SET "data_purged_at" = $2 WHERE "id" = $1`, [
-        companyId,
-        now,
-      ]);
+      await this.purgeRepository.markPurged(companyId, now, manager);
 
       const result: ExpiredPurgeResult = {
         companyId,

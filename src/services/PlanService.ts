@@ -95,9 +95,11 @@ function assertDuration(days: number): void {
 }
 
 export class PlanService {
-  private planRepository = new PlanRepository();
-  private settingsService = new SettingsService();
-  private auditService = new AuditService();
+  constructor(
+    private readonly planRepository = new PlanRepository(),
+    private readonly settingsService = new SettingsService(),
+    private readonly auditService = new AuditService(),
+  ) {}
 
   /**
    * Admin catalogue — everything, annotated with whether each plan can safely be
@@ -415,10 +417,7 @@ export class PlanService {
 
   /** Only one plan may wear the "Most Popular" badge at a time. */
   private async clearOtherPopular(keepPlanId: string, manager: EntityManager): Promise<void> {
-    await manager.query(
-      `UPDATE "plans" SET "is_popular" = false WHERE "id" <> $1 AND "is_popular" = true`,
-      [keepPlanId],
-    );
+    await this.planRepository.clearOtherPopular(keepPlanId, manager);
   }
 
   /**
@@ -431,13 +430,6 @@ export class PlanService {
    * already hold the badge and must not be cleared out from under itself.
    */
   private async clearAllPopular(manager: EntityManager, exceptPlanId?: string): Promise<void> {
-    if (exceptPlanId) {
-      await manager.query(
-        `UPDATE "plans" SET "is_popular" = false WHERE "is_popular" = true AND "id" <> $1`,
-        [exceptPlanId],
-      );
-      return;
-    }
-    await manager.query(`UPDATE "plans" SET "is_popular" = false WHERE "is_popular" = true`);
+    await this.planRepository.clearAllPopular(manager, exceptPlanId);
   }
 }
