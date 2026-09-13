@@ -23,6 +23,7 @@ import { UserRepository } from "@/repositories/UserRepository";
 import { PasswordService } from "@/services/PasswordService";
 import { TokenService } from "@/services/TokenService";
 import { generateRandomToken } from "@/utils/crypto";
+import { assertEmailsDeliverable } from "@/utils/emailDeliverability";
 import { INVITE_TTL_HOURS } from "@/config/onboarding";
 import type { AuditLogQueryInput, CreateCompanyInput } from "@/validation/schemas/admin.schema";
 import type {
@@ -115,6 +116,13 @@ export class SuperAdminService {
     if (compedUntil && compedUntil.getTime() <= Date.now()) {
       throw BadRequestError("The free-access date must be in the future.");
     }
+
+    // Before the transaction: the set-password invite goes out the moment it commits,
+    // and an operator's typo bounces against the SMTP mailbox exactly like a customer's.
+    await assertEmailsDeliverable([
+      { field: "email", value: email },
+      { field: "contactEmail", value: input.contactEmail },
+    ]);
 
     const result = await AppDataSource.transaction(async (manager) => {
       await this.assertOnboardingIdentifiersFree(email, input.registrationNumber, manager);

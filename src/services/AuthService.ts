@@ -14,6 +14,7 @@ import { config } from "@/config/index";
 import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from "@/errors/index";
 import { logger } from "@/utils/logger";
 import { generateRandomToken } from "@/utils/crypto";
+import { assertEmailsDeliverable } from "@/utils/emailDeliverability";
 import { TokenRepository } from "@/repositories/TokenRepository";
 import type {
   LoginInput,
@@ -129,6 +130,14 @@ export class AuthService {
   ): Promise<RegisterCompanyResult> {
     const email = input.email.trim().toLowerCase();
     const username = input.username.trim();
+
+    // First, before the password hash, the transaction and the verification token: an
+    // address that fails here must never have anything sent to it. Both are checked
+    // because both receive mail from us.
+    await assertEmailsDeliverable([
+      { field: "email", value: email },
+      { field: "contactEmail", value: input.contactEmail },
+    ]);
 
     const passwordHash = await this.passwordService.hash(input.password);
 

@@ -13,6 +13,10 @@ import {
 } from "@/cron/subscriptionStatus.cron";
 import { startAccountDeletionCron, stopAccountDeletionCron } from "@/cron/accountDeletion.cron";
 import { startExpiredDataPurgeCron, stopExpiredDataPurgeCron } from "@/cron/expiredDataPurge.cron";
+import {
+  startUnverifiedCleanupCron,
+  stopUnverifiedCleanupCron,
+} from "@/cron/unverifiedCleanup.cron";
 import { logger } from "@/utils/logger";
 import { getMailer } from "@/config/mailer";
 
@@ -72,6 +76,7 @@ async function start(): Promise<void> {
   startSubscriptionStatusCron();
   startAccountDeletionCron();
   startExpiredDataPurgeCron();
+  startUnverifiedCleanupCron();
 
   const server = app.listen(config.PORT, () => {
     logger.info({ port: config.PORT, env: config.NODE_ENV }, "Server listening");
@@ -99,6 +104,7 @@ async function start(): Promise<void> {
     stopSubscriptionStatusCron();
     stopAccountDeletionCron();
     stopExpiredDataPurgeCron();
+    stopUnverifiedCleanupCron();
     await new Promise<void>((resolve) => {
       server.close(() => {
         logger.info("HTTP server closed");

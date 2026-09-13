@@ -3,6 +3,7 @@ import { config } from "@/config/index";
 import { ConflictError, NotFoundError } from "@/errors/index";
 import { AuditService } from "@/services/AuditService";
 import { generateRandomToken } from "@/utils/crypto";
+import { assertEmailsDeliverable } from "@/utils/emailDeliverability";
 import { logger } from "@/utils/logger";
 import type { Company, SubscriptionStatus } from "@/entities/Company";
 import { computeEntitlement } from "@/utils/entitlement";
@@ -219,6 +220,19 @@ export class CompanyService {
     input: UpdateProfileInput,
     emailVerifiedAt?: Date | null,
   ): Promise<CompanyProfile> {
+    // Checked only when the address actually CHANGES. The profile form resubmits every
+    // field, so an unconditional check would stop a company with a grandfathered
+    // address from saving an unrelated change such as its phone number — and would put
+    // a DNS lookup on every save.
+    if (input.contactEmail !== undefined) {
+      const current = await this.companyRepository.findById(companyId);
+      if (!current) throw NotFoundError("Company not found");
+      const next = input.contactEmail.trim().toLowerCase();
+      if (next !== current.contactEmail.trim().toLowerCase()) {
+        await assertEmailsDeliverable([{ field: "contactEmail", value: input.contactEmail }]);
+      }
+    }
+
     const updates: Parameters<CompanyRepository["updateProfile"]>[1] = {};
     if (input.streetAddress !== undefined) updates.streetAddress = input.streetAddress;
     if (input.city !== undefined) updates.city = input.city;

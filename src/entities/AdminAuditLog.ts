@@ -36,6 +36,10 @@ export const AUDIT_ACTIONS = [
   // (reset links, notices) is sent to, so moving it is recorded.
   "user.email_change_request",
   "user.email_change",
+  // Actor is the system (actor_user_id NULL, actor_email "system:unverified-cleanup"):
+  // the nightly job hard-deleting a signup that never verified its email. Listed so the
+  // admin audit-log filter accepts it; nothing else about the row is special.
+  "company.unverified_cleanup",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

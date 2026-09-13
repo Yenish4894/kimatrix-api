@@ -14,6 +14,7 @@ import {
   renderEmailChangeNoticeEmail,
 } from "@/templates/emailChange.template";
 import { generateRandomToken } from "@/utils/crypto";
+import { assertEmailsDeliverable } from "@/utils/emailDeliverability";
 import { logger } from "@/utils/logger";
 import type { EmailChangeRequestInput } from "@/validation/schemas/auth.schema";
 
@@ -59,6 +60,11 @@ export class EmailChangeService {
     if (newEmail === user.email.toLowerCase()) {
       throw BadRequestError("That is already your login email.");
     }
+    // Before the token is minted and the confirmation link mailed: that link is the one
+    // message this flow sends to the new address, and a bounce from it counts against
+    // the SMTP mailbox like any other. After the password check, so this cannot be used
+    // as an unauthenticated DNS oracle.
+    await assertEmailsDeliverable([{ field: "newEmail", value: newEmail }]);
     const taken = await this.userRepository.findByEmail(newEmail);
     if (taken && taken.id !== user.id) throw ConflictError(EMAIL_UNAVAILABLE);
 

@@ -86,6 +86,22 @@ export const config = {
    */
   EXPIRY_PURGE_ENABLED: parseBool(process.env["EXPIRY_PURGE_ENABLED"]),
 
+  /**
+   * Cloudflare Turnstile secret for the signup form. Deliberately OPTIONAL in every
+   * environment, production included, and therefore absent from REQUIRED_IN_PRODUCTION:
+   * the check is feature-flagged on this key until the client supplies one, and its
+   * absence must never stop the server booting. Set → every registration needs a valid
+   * token (fail closed). Unset → no check at all.
+   */
+  TURNSTILE_SECRET_KEY: process.env["TURNSTILE_SECRET_KEY"] ?? "",
+
+  /**
+   * Arms the nightly removal of never-verified signups. Off unless explicitly "true":
+   * like the expiry purge it deletes irreversibly, so it ships in dry-run mode — logging
+   * what it WOULD remove — and is switched on once those logs have been read.
+   */
+  UNVERIFIED_CLEANUP_ENABLED: parseBool(process.env["UNVERIFIED_CLEANUP_ENABLED"]),
+
   PAYPAL_CLIENT_ID: process.env["PAYPAL_CLIENT_ID"] ?? "",
   PAYPAL_CLIENT_SECRET: process.env["PAYPAL_CLIENT_SECRET"] ?? "",
   // The cast is only a promise; `validateConfig` checks it in production, where a typo

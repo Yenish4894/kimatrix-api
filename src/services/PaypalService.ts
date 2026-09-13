@@ -1,5 +1,6 @@
 import { config } from "@/config/index";
 import { logger } from "@/utils/logger";
+import { fetchWithTimeout as fetchWithDeadline } from "@/utils/fetchWithTimeout";
 import { AppError, BadRequestError } from "@/errors/index";
 
 interface PaypalTokenResponse {
@@ -77,10 +78,9 @@ export interface PaypalCaptureResult {
 
 const PAYPAL_TIMEOUT_MS = 15_000;
 
+/** PayPal's deadline, over the shared helper (also used by the Turnstile check). */
 function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PAYPAL_TIMEOUT_MS);
-  return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+  return fetchWithDeadline(url, init, PAYPAL_TIMEOUT_MS);
 }
 
 export interface PaypalSubscriptionResource {

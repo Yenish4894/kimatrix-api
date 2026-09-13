@@ -2,6 +2,7 @@ import { Router } from "express";
 import { AuthController } from "@/controllers/AuthController";
 import { EmailChangeController } from "@/controllers/EmailChangeController";
 import { authMiddleware } from "@/middleware/auth";
+import { rejectHoneypot, requireTurnstile } from "@/middleware/botProtection";
 import {
   emailChangeConfirmLimiter,
   emailChangeRequestLimiter,
@@ -28,10 +29,20 @@ const router = Router();
 const authController = new AuthController();
 const emailChangeController = new EmailChangeController();
 
+// Order is deliberate:
+//  1. rate limit — cheapest refusal first
+//  2. honeypot — BEFORE Joi, so a bot gets one generic refusal instead of a
+//     field-by-field list of what to fix
+//  3. Joi
+//  4. Turnstile — AFTER Joi, so a form mistake does not burn the single-use token
+//  5. controller → AuthService, which runs the email deliverability checks before
+//     touching the database
 router.post(
   "/register/company",
   registerLimiter,
+  rejectHoneypot,
   validateRequest(registerCompanySchema, ValidationTarget.BODY),
+  requireTurnstile,
   authController.registerCompany,
 );
 

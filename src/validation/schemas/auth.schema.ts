@@ -50,6 +50,18 @@ export const registerCompanySchema = Joi.object({
     .valid(true)
     .required()
     .messages({ "any.only": "You must accept the terms to continue." }),
+
+  // Honeypot. The frontend renders it off-screen, so only a form-filling bot puts
+  // anything in it. Declared here rather than left to `stripUnknown` so it survives
+  // validation. The real check is the `rejectHoneypot` middleware, which runs BEFORE
+  // this schema; this rule is the backstop, and keeps the same generic wording.
+  website: Joi.any()
+    .valid("", null)
+    .optional()
+    .messages({ "any.only": "Registration could not be completed." }),
+  // Cloudflare Turnstile response token. Whether it is REQUIRED depends on config
+  // (TURNSTILE_SECRET_KEY), which a schema cannot see — `requireTurnstile` enforces it.
+  turnstileToken: Joi.string().trim().max(2048).allow("").optional(),
 }).required();
 
 export interface RegisterCompanyInput {
@@ -70,6 +82,9 @@ export interface RegisterCompanyInput {
   confirmPassword: string;
   promoEmailOptIn: boolean;
   termsAccepted: true;
+  /** Honeypot; always empty or absent by the time a service sees the input. */
+  website?: string | null;
+  turnstileToken?: string;
 }
 
 export const loginSchema = Joi.object({
