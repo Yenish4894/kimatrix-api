@@ -83,6 +83,7 @@ export class AdminBanService {
   async activateCompany(
     actor: { id: string; email: string },
     companyId: string,
+    reason?: string | null,
   ): Promise<{ status: string; hasAccess: boolean }> {
     return this.db.transaction(async (manager) => {
       const company = await this.companyRepository.findById(companyId, manager);
@@ -119,7 +120,9 @@ export class AdminBanService {
             bannedReason: company.deactivationReason ?? null,
           },
           after: { subscriptionStatus: entitlement.status, isActive: entitlement.hasAccess },
-          note: company.deactivationReason ?? null,
+          // The unban's own note. It used to repeat the ban reason, so the log read as
+          // two bans; that reason is already preserved in `before.bannedReason`.
+          note: reason?.trim() ? `Ban lifted: ${reason.trim()}` : "Ban lifted",
         },
         manager,
       );

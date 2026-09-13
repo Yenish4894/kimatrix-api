@@ -273,10 +273,14 @@ export class QrService {
     const elapsedMs = Date.now() - recent.lastSubmissionAt.getTime();
     if (elapsedMs >= intervalMs) return;
 
-    const remainingMinutes = Math.max(1, Math.ceil((intervalMs - elapsedMs) / 60_000));
+    const remainingMs = intervalMs - elapsedMs;
+    const remainingMinutes = Math.max(1, Math.ceil(remainingMs / 60_000));
     const minutesLabel = remainingMinutes === 1 ? "minute" : "minutes";
+    // The exact wait travels with the error, so the form's "Try again in …" button
+    // counts down the same wait this sentence describes.
     throw TooManyRequestsError(
       `You've already submitted a receipt at this business recently. Please wait about ${remainingMinutes} more ${minutesLabel} before submitting another one.`,
+      Math.max(1, Math.ceil(remainingMs / 1000)),
     );
   }
 

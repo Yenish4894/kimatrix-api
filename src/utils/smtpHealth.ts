@@ -224,3 +224,14 @@ export function parseOutcome(raw: string | null | undefined): SmtpSendOutcome | 
     return null;
   }
 }
+
+/**
+ * True when the most recent real send was refused outright (a `hard` failure: account
+ * suspended, auth refused). Until a human fixes that, nothing queued will be delivered —
+ * so a caller that just queued an email (the admin's "Add company" invite) can say so
+ * instead of implying it went out. Transient and per-recipient failures do not count.
+ */
+export function isSmtpDeliveryDown(record: SmtpHealthRecord): boolean {
+  const last = record.last;
+  return last !== null && !last.ok && last.kind === "hard";
+}

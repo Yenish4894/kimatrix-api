@@ -220,7 +220,28 @@ describe("AdminBanService.activateCompany", () => {
       bannedAt: bannedAt.toISOString(),
       bannedReason: "Trial abuse",
     });
-    assert.equal(audits[0]?.note, "Trial abuse");
+    // The unban records its OWN note, not the ban's reason again.
+    assert.equal(audits[0]?.note, "Ban lifted");
+  });
+
+  it("records the unban's own reason when one is given", async () => {
+    const { audits, auditService } = recorder();
+    const companyRepository = {
+      findById: async () =>
+        company({ deactivatedAt: new Date(), deactivationReason: "Trial abuse" }),
+      clearDeactivation: async () => undefined,
+      setEntitlementState: async () => undefined,
+    } as unknown as CompanyRepository;
+    const service = new AdminBanService(
+      companyRepository,
+      {} as SubscriptionService,
+      {} as TokenRepository,
+      auditService,
+      db,
+    );
+    await service.activateCompany(actor, "co-1", "  Owner appealed; verified  ");
+    assert.equal(audits[0]?.note, "Ban lifted: Owner appealed; verified");
+    assert.equal((audits[0]?.before as { bannedReason: string }).bannedReason, "Trial abuse");
   });
 
   it("restores access for a company whose paid time is still running", async () => {

@@ -8,6 +8,7 @@ import { UserRepository } from "@/repositories/UserRepository";
 import { AuditService } from "@/services/AuditService";
 import { EmailService } from "@/services/EmailService";
 import { PasswordService } from "@/services/PasswordService";
+import { readSmtpHealth } from "@/services/SmtpHealthStore";
 import { TokenService } from "@/services/TokenService";
 import { generateRandomToken } from "@/utils/crypto";
 import type { TransactionRunner } from "@/utils/db";
@@ -15,6 +16,7 @@ import { assertEmailsDeliverable } from "@/utils/emailDeliverability";
 import { computeEntitlement } from "@/utils/entitlement";
 import { inviteResendBlock } from "@/utils/inviteResend";
 import { logger } from "@/utils/logger";
+import { isSmtpDeliveryDown } from "@/utils/smtpHealth";
 import type { CreateCompanyInput } from "@/validation/schemas/admin.schema";
 
 /** Admin onboarding: creating a company on someone's behalf and (re)sending its invite. */
@@ -50,7 +52,12 @@ export class AdminOnboardingService {
   async createCompany(
     actor: { id: string; email: string },
     input: CreateCompanyInput,
-  ): Promise<{ companyId: string; ownerEmail: string; compedUntil: Date | null }> {
+  ): Promise<{
+    companyId: string;
+    ownerEmail: string;
+    compedUntil: Date | null;
+    emailDeliveryDown: boolean;
+  }> {
     const email = input.email.trim().toLowerCase();
     const compedUntil = input.compedUntil ? new Date(input.compedUntil) : null;
 
@@ -173,11 +180,21 @@ export class AdminOnboardingService {
       );
     }
 
+    // The invite is only queued. If the last real send was refused outright, it will
+    // not arrive until email is fixed — tell the admin rather than let the UI imply it
+    // went out. Best effort: a Redis blip must not fail a company that was created.
+    let emailDeliveryDown = false;
+    try {
+      emailDeliveryDown = isSmtpDeliveryDown(await readSmtpHealth());
+    } catch (err) {
+      logger.warn({ err }, "Could not read SMTP health after creating a company");
+    }
+
     logger.info(
       { companyId: result.company.id, actorId: actor.id, compedUntil },
       "Company onboarded by admin",
     );
-    return { companyId: result.company.id, ownerEmail: email, compedUntil };
+    return { companyId: result.company.id, ownerEmail: email, compedUntil, emailDeliveryDown };
   }
 
   /**

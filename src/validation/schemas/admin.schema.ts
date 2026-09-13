@@ -340,6 +340,18 @@ export interface CompanyBanInput {
   reason: string;
 }
 
+// Lifting a ban takes an OPTIONAL reason. It is written to the unban's audit row as its
+// own note; without one the note is just "Ban lifted" (it used to repeat the ban reason).
+export const companyUnbanSchema = Joi.object({
+  reason: Joi.string().trim().max(255).allow("", null).messages({
+    "string.max": "Keep the reason under 255 characters.",
+  }),
+});
+
+export interface CompanyUnbanInput {
+  reason?: string | null;
+}
+
 export const adminDeletionSchema = Joi.object({
   reason: Joi.string().trim().min(3).max(255).required().messages({
     "any.required": "Record who asked for this and how.",

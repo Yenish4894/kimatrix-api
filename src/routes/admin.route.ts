@@ -13,6 +13,7 @@ import {
   auditLogQuerySchema,
   companyIdParamSchema,
   companyBanSchema,
+  companyUnbanSchema,
   createCompanySchema,
   adminDeletionSchema,
   createPlanSchema,
@@ -122,6 +123,7 @@ router.patch(
 router.patch(
   "/companies/:companyId/activate",
   validateRequest(companyIdParamSchema, ValidationTarget.PARAMS),
+  validateRequest(companyUnbanSchema, ValidationTarget.BODY),
   controller.activateCompany,
 );
 

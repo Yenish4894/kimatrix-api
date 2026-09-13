@@ -4,6 +4,7 @@ import RedisStore from "rate-limit-redis";
 import { getRedisClient } from "@/config/redis.client";
 import { config } from "@/config/index";
 import { logger } from "@/utils/logger";
+import { hasVerifiedSuperAdminToken } from "@/utils/rateLimitBypass";
 
 const ONE_MIN = 60 * 1000;
 const ONE_DAY = 24 * 60 * 60 * 1000;
@@ -175,8 +176,14 @@ export const globalApiLimiter = buildLimiter({
    *
    * The endpoint is not unprotected by this: it verifies a PayPal signature before
    * doing anything, and every event is deduplicated on its event id.
+   *
+   * Platform admins are exempt too, on a VERIFIED super_admin access token only (see
+   * utils/rateLimitBypass.ts). This cap exists for anonymous traffic; one admin working
+   * through the companies screens hit it in normal use, and a ban/unban came back 429.
    */
-  skip: (req) => req.path === "/api/payments/paypal/webhook",
+  skip: (req) =>
+    req.path === "/api/payments/paypal/webhook" ||
+    hasVerifiedSuperAdminToken(req.headers.authorization, config.JWT_SECRET),
 });
 
 export const loginLimiter = buildLimiter({

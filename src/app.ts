@@ -28,7 +28,15 @@ app.use(
 );
 // Both the apex and the www form — they are separate origins to a browser, and the
 // site answers on both. See utils/origins.ts for what this cost us.
-app.use(cors({ origin: buildAllowedOrigins(config.FRONTEND_BASE_URL), credentials: true }));
+// Retry-After is exposed because it is not CORS-safelisted: without this the frontend
+// cannot read how long a 429 asks it to wait, and every countdown fell back to a guess.
+app.use(
+  cors({
+    origin: buildAllowedOrigins(config.FRONTEND_BASE_URL),
+    credentials: true,
+    exposedHeaders: ["Retry-After"],
+  }),
+);
 app.use(globalApiLimiter);
 
 app.use(

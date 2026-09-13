@@ -12,6 +12,8 @@ export class AppError extends Error {
   public readonly statusCode: number;
   public readonly code: string;
   public readonly details?: AppErrorDetail[];
+  /** 429s only: sent as `Retry-After` and as `retryAfterSeconds` in the body. */
+  public retryAfterSeconds?: number;
 
   constructor(
     message: string,
@@ -45,8 +47,19 @@ export const ConflictError = (message = "Resource conflict", details?: AppErrorD
 export const ValidationError = (message = "Validation failed", details: AppErrorDetail[] = []) =>
   new AppError(message, 400, "VALIDATION_ERROR", details);
 
-export const TooManyRequestsError = (message = "Too many requests") =>
-  new AppError(message, 429, "RATE_LIMIT_EXCEEDED");
+/**
+ * `retryAfterSeconds`, when given, is sent both as a `Retry-After` header and in the
+ * body. The body copy matters: Retry-After is not a CORS-safelisted header, so the
+ * cross-origin frontend cannot read it, and the QR form fell back to a 60s countdown
+ * under a message saying "wait about 14 more minutes".
+ */
+export const TooManyRequestsError = (message = "Too many requests", retryAfterSeconds?: number) => {
+  const err = new AppError(message, 429, "RATE_LIMIT_EXCEEDED");
+  if (retryAfterSeconds !== undefined && retryAfterSeconds > 0) {
+    err.retryAfterSeconds = Math.ceil(retryAfterSeconds);
+  }
+  return err;
+};
 
 /**
  * Distinct from ForbiddenError so the frontend can react deterministically —
@@ -137,11 +150,15 @@ export function errorHandler(err: Error, req: Request, res: Response, _next: Nex
     if (err.statusCode >= 500) {
       reqLogger.error({ err, code: err.code }, "AppError (5xx)");
     }
+    if (err.retryAfterSeconds !== undefined) {
+      res.setHeader("Retry-After", String(err.retryAfterSeconds));
+    }
     res.status(err.statusCode).json({
       success: false,
       message: err.message,
       error: err.code,
       details: err.details,
+      ...(err.retryAfterSeconds !== undefined && { retryAfterSeconds: err.retryAfterSeconds }),
       requestId,
       timestamp: new Date().toISOString(),
       ...(isDevelopment && { stack: err.stack }),

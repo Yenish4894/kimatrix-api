@@ -29,6 +29,7 @@ import type {
 } from "@/validation/schemas/company.schema";
 import type {
   AuditLogQueryInput,
+  CompanyUnbanInput,
   CreatePlanBody,
   ListCompaniesQueryInput,
   UpdatePlanBody,
@@ -72,9 +73,11 @@ export class SuperAdminController extends BaseController {
         { id: req.user.id, email: req.user.email },
         req.body as CreateCompanyInput,
       );
+      // "Queued": the invite goes through the email queue after this returns, so the
+      // API cannot promise it was sent (see `emailDeliveryDown` on the result).
       return {
         data: result,
-        message: "Company created. An invite has been emailed to the owner.",
+        message: "Company created. The invite has been queued for the owner.",
       };
     });
   };
@@ -97,7 +100,14 @@ export class SuperAdminController extends BaseController {
     await this.handle(req, res, next, async () => {
       if (!req.user) throw UnauthorizedError("Admin context missing");
       const companyId = req.params["companyId"] as string;
-      await this.banService.activateCompany({ id: req.user.id, email: req.user.email }, companyId);
+      // The body is optional (the frontend sends none); a reason, when given, becomes
+      // the unban's own audit note.
+      const { reason } = (req.body ?? {}) as CompanyUnbanInput;
+      await this.banService.activateCompany(
+        { id: req.user.id, email: req.user.email },
+        companyId,
+        reason ?? null,
+      );
       return { data: null, message: "Company activated" };
     });
   };
