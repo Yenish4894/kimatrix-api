@@ -30,13 +30,37 @@ describe("rankCustomers", () => {
     );
   });
 
-  it("gives tied customers the same rank, then skips", () => {
-    // RANK(), not ROW_NUMBER(). 1, 2, 3 down a column of identical totals claims a
-    // winner where there is really a tie to settle — and this list decides a prize.
-    const ranked = rankCustomers([customer("b", "100"), customer("a", "100"), customer("c", "50")]);
+  it("numbers ranks consecutively even when totals tie", () => {
+    // Product decision 2026-09-13: "5, 5, 7" / "8, 8, 10" was reported as a bug.
+    const ranked = rankCustomers([
+      customer("b", "100"),
+      customer("a", "100"),
+      customer("c", "50"),
+      customer("d", "50"),
+      customer("e", "10"),
+    ]);
     assert.deepEqual(
       ranked.map((r) => r.rank),
-      [1, 1, 3],
+      [1, 2, 3, 4, 5],
+    );
+  });
+
+  it("breaks equal totals by more purchases, then by mobile", () => {
+    const few = { ...customer("a", "100"), submission_count: 1 };
+    const many = { ...customer("z", "100"), submission_count: 5 };
+    const ranked = rankCustomers([few, many, customer("m", "100")]);
+    assert.deepEqual(
+      ranked.map((r) => r.row.mobile),
+      ["z", "a", "m"],
+    );
+  });
+
+  it("treats the same amount written differently as a tie", () => {
+    // Postgres NUMERIC comes back as "100.00"; a hand-built row might say "100".
+    const ranked = rankCustomers([customer("b", "100.00"), customer("a", 100)]);
+    assert.deepEqual(
+      ranked.map((r) => r.row.mobile),
+      ["a", "b"],
     );
   });
 
@@ -82,33 +106,37 @@ describe("topTen", () => {
     assert.equal(topTen(many(4)).length, 4);
   });
 
-  it("keeps everyone tied at the cutoff rather than cutting mid-tie", () => {
-    // Dropping a customer whose spend exactly equals tenth place is indefensible when
-    // the list is being used to hand out a prize.
+  it("is exactly ten rows ranked 1 to 10, even with a tie at the cutoff", () => {
     const rows = [...many(9), customer("tie-a", "100"), customer("tie-b", "100")];
     const top = topTen(rows);
-    assert.equal(top.length, 11, "both customers on the cutoff amount must appear");
-    assert.deepEqual(
-      top.slice(-2).map((r) => r.rank),
-      [10, 10],
-    );
-  });
-
-  it("bolding is keyed on rank, so a tie for first bolds three rows", () => {
-    // Bolding by row index would bold the fourth-placed customer merely for sitting in
-    // the third row, and would miss a third customer genuinely tied for first.
-    const rows = [
-      customer("a", "500"),
-      customer("b", "500"),
-      customer("c", "500"),
-      customer("d", "100"),
-    ];
-    const top = topTen(rows);
+    assert.equal(top.length, 10);
     assert.deepEqual(
       top.map((r) => r.rank),
-      [1, 1, 1, 4],
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     );
-    assert.equal(top.filter((r) => r.rank <= 3).length, 3);
+    // The tie at the cutoff is settled by the deterministic tie-break (mobile here).
+    assert.equal(top[9]!.row.mobile, "tie-a");
+  });
+
+  it("never repeats or skips a rank, whatever the ties", () => {
+    // The reported bug: 1 2 3 4 5 5 6 7 8 8 10.
+    const rows = [
+      customer("a", "900"),
+      customer("b", "800"),
+      customer("c", "700"),
+      customer("d", "600"),
+      customer("e", "500"),
+      customer("f", "500"),
+      customer("g", "400"),
+      customer("h", "300"),
+      customer("i", "200"),
+      customer("j", "200"),
+      customer("k", "100"),
+    ];
+    assert.deepEqual(
+      topTen(rows).map((r) => r.rank),
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    );
   });
 
   it("handles an empty list", () => {

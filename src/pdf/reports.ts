@@ -80,44 +80,28 @@ function formatDateTime(value: Date | string | null): string {
 }
 
 /**
- * Highest spend first, ranked with ties sharing a place.
+ * Highest spend first, numbered 1, 2, 3… with no shared or skipped places.
  *
- * RANK(), not ROW_NUMBER(). Printing 1, 2, 3 down a column of identical totals tells
- * whoever is running a draw that there is a winner where there is really a tie to
- * settle. Ties break on mobile so two downloads of the same data never disagree about
- * the order.
+ * Product decision (2026-09-13): the rank column is always consecutive, even when two
+ * customers have the same total — a list reading "5, 5, 7" or "8, 8, 10" was reported
+ * as a bug. Equal totals are ordered by more purchases first, then by mobile, so the
+ * order is deterministic and two downloads of the same data never disagree.
  */
 export function rankCustomers(rows: CustomerRow[]): { row: CustomerRow; rank: number }[] {
-  const sorted = [...rows].sort((a, b) => {
-    const diff = amountOf(b.total_invoice_amount) - amountOf(a.total_invoice_amount);
-    if (diff !== 0) return diff;
-    return String(a.mobile ?? "").localeCompare(String(b.mobile ?? ""));
-  });
-
-  const out: { row: CustomerRow; rank: number }[] = [];
-  let rank = 0;
-  let previous: number | null = null;
-  sorted.forEach((row, i) => {
-    const value = amountOf(row.total_invoice_amount);
-    if (previous === null || value !== previous) rank = i + 1;
-    previous = value;
-    out.push({ row, rank });
-  });
-  return out;
+  return [...rows]
+    .sort((a, b) => {
+      const diff = amountOf(b.total_invoice_amount) - amountOf(a.total_invoice_amount);
+      if (diff !== 0) return diff;
+      const purchases = Number(b.submission_count ?? 0) - Number(a.submission_count ?? 0);
+      if (purchases !== 0) return purchases;
+      return String(a.mobile ?? "").localeCompare(String(b.mobile ?? ""));
+    })
+    .map((row, i) => ({ row, rank: i + 1 }));
 }
 
-/**
- * The top ten, keeping everyone tied at the cutoff.
- *
- * A strict slice of ten would drop a customer whose spend exactly equals the tenth
- * place — indefensible when the list is being used to hand out a prize.
- */
+/** Exactly the first ten of `rankCustomers` — ranks 1 to 10, never more rows. */
 export function topTen(rows: CustomerRow[]): { row: CustomerRow; rank: number }[] {
-  const ranked = rankCustomers(rows);
-  const tenth = ranked[9];
-  if (!tenth) return ranked;
-  const cutoff = amountOf(tenth.row.total_invoice_amount);
-  return ranked.filter((entry) => amountOf(entry.row.total_invoice_amount) >= cutoff);
+  return rankCustomers(rows).slice(0, 10);
 }
 
 function buildDoc(kind: ReportKind, ctx: ReportContext, subtitle: string) {
@@ -170,11 +154,10 @@ const HEAD_STYLES = {
  */
 export function renderTop10Pdf(rows: CustomerRow[], ctx: ReportContext): Buffer {
   const ranked = topTen(rows);
-  const extra = ranked.length > 10 ? ` (${ranked.length} shown — ties at the cutoff)` : "";
   const { doc, assets, startY } = buildDoc(
     "top10",
     ctx,
-    ranked.length === 0 ? "No customers yet" : `Ranked by total spend${extra}`,
+    ranked.length === 0 ? "No customers yet" : "Ranked by total spend",
   );
 
   if (ranked.length === 0) {
@@ -206,8 +189,7 @@ export function renderTop10Pdf(rows: CustomerRow[], ctx: ReportContext): Buffer 
     rowPageBreak: "avoid",
     didParseCell: (data) => {
       if (data.section !== "body") return;
-      // Keyed on rank, not row index: a three-way tie for first bolds three rows, and
-      // the fourth-placed customer is not bolded merely for sitting in row three.
+      // Ranks are consecutive, so this bolds exactly the first three rows.
       const entry = ranked[data.row.index];
       if (entry && entry.rank <= 3) {
         data.cell.styles.fontStyle = "bold";

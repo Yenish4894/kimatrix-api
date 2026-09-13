@@ -169,10 +169,10 @@ export class PurchaseRepository {
    * purchases in a month meant 100 round trips before the page could render anything,
    * and every one of those rows crossed the wire only to be reduced to ten numbers.
    *
-   * `RANK()` rather than `ROW_NUMBER()` is what preserves the old behaviour exactly:
-   * the previous code took the top ten *and everyone tied with the tenth*, and RANK
-   * gives tied totals the same rank, so `rnk <= 10` reproduces that without the caller
-   * having to know. ROW_NUMBER would silently cut one of two identical top spenders.
+   * `ROW_NUMBER()`, not `RANK()`: the top list is exactly ten rows numbered 1 to 10
+   * (product decision 2026-09-13 — shared or skipped places were reported as a bug).
+   * Equal totals are ordered by more purchases, then by mobile, the same tie-break as
+   * pdf/reports.ts `rankCustomers`, so the page, its PDF and the emailed PDF agree.
    *
    * The window runs over the aggregate, not the raw rows, so it ranks customers rather
    * than individual purchases.
@@ -215,13 +215,15 @@ export class PurchaseRepository {
           GROUP BY p."customer_id"
        ),
        ranked AS (
-         SELECT agg.*, RANK() OVER (ORDER BY total_spend DESC) AS rnk FROM agg
+         SELECT agg.*,
+                ROW_NUMBER() OVER (ORDER BY total_spend DESC, purchase_count DESC, mobile ASC) AS rnk
+           FROM agg
        )
        SELECT customer_id, full_name, vehicle_number, mobile,
               total_spend, purchase_count, last_activity
          FROM ranked
         WHERE rnk <= 10
-        ORDER BY total_spend DESC, purchase_count DESC`,
+        ORDER BY rnk`,
       [params.companyId, params.from, params.to],
     )) as TopCustomerRow[];
 
