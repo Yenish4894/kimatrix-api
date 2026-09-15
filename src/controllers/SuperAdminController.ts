@@ -261,7 +261,7 @@ export class SuperAdminController extends BaseController {
       const { identityId } = req.params as { identityId: string };
       const { reason } = req.body as ReleaseTrialIdentityInput;
       await this.trialService.releaseTrialIdentity(identityId, reason, this.actor(req));
-      return { data: null, message: "That identifier can be used for a free trial again." };
+      return { data: null, message: "That identifier can be used for a trial again." };
     });
   };
 

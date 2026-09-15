@@ -182,7 +182,7 @@ export class SettingsService {
   ): Promise<number> {
     if (!Number.isInteger(days) || days < TRIAL_DURATION_MIN || days > TRIAL_DURATION_MAX) {
       throw BadRequestError(
-        `The free trial must be between ${TRIAL_DURATION_MIN} and ${TRIAL_DURATION_MAX} days.`,
+        `The trial must be between ${TRIAL_DURATION_MIN} and ${TRIAL_DURATION_MAX} days.`,
       );
     }
     await this.appSettingRepository.upsert(

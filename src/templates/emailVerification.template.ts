@@ -15,18 +15,16 @@ interface RenderedEmail {
 
 export function renderEmailVerificationEmail(data: EmailVerificationTemplateData): RenderedEmail {
   const brand = config.SMTP_FROM_NAME || "KIMates";
-  const subject = `Confirm your email to start your ${brand} free trial`;
+  const subject = `Confirm your email to activate your ${brand} account`;
   const safeUrl = data.verifyUrl;
   const minutes = data.expiresInMinutes;
-  const days = data.trialDurationDays;
   const hours = Math.round(minutes / 60);
   const expiryLabel = minutes >= 120 ? `${hours} hours` : `${minutes} minutes`;
 
   const text = [
     `Welcome to ${brand}.`,
     ``,
-    `Confirm your email address to activate your account and start your ${days}-day free trial.`,
-    `Your trial clock only starts once you confirm, so you won't lose any of it.`,
+    `Confirm your email address to activate your account.`,
     ``,
     `This link expires in ${expiryLabel}.`,
     ``,
@@ -56,13 +54,13 @@ export function renderEmailVerificationEmail(data: EmailVerificationTemplateData
             </tr>
             <tr>
               <td style="padding:0 40px 16px;font-size:15px;line-height:1.6;color:#374151;">
-                <p style="margin:0 0 16px;">Welcome to ${escapeHtml(brand)}. Confirm your email address to activate your account and start your <strong>${days}-day free trial</strong>.</p>
-                <p style="margin:0 0 24px;">Your trial clock only starts once you confirm, so none of it is spent waiting on this email. The link expires in <strong>${escapeHtml(expiryLabel)}</strong>.</p>
+                <p style="margin:0 0 16px;">Welcome to ${escapeHtml(brand)}. Confirm your email address to activate your account.</p>
+                <p style="margin:0 0 24px;">The link expires in <strong>${escapeHtml(expiryLabel)}</strong>.</p>
               </td>
             </tr>
             <tr>
               <td align="center" style="padding:0 40px 24px;">
-                <a href="${safeUrl}" style="display:inline-block;background:#0891B2;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:8px;font-size:15px;font-weight:600;">Confirm email &amp; start trial</a>
+                <a href="${safeUrl}" style="display:inline-block;background:#0891B2;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:8px;font-size:15px;font-weight:600;">Confirm email</a>
               </td>
             </tr>
             <tr>

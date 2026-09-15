@@ -226,7 +226,7 @@ export class EmailChangeService {
     logger.info({ userId: result.userId }, "Login email changed; all sessions revoked");
     return {
       message: result.needsVerification
-        ? "Your login email has been changed. We've sent a verification link to the new address to start your free trial. Please sign in again."
+        ? "Your login email has been changed. We've sent a verification link to the new address to activate your account. Please sign in again."
         : "Your login email has been changed. Please sign in again.",
       email: result.newEmail,
     };

@@ -44,10 +44,10 @@ function copyFor(
   switch (kind) {
     case "trial_ending":
       return {
-        subject: `Your ${brand} free trial ends ${when}`,
-        heading: "Your free trial is nearly up",
+        subject: `Your ${brand} trial ends ${when}`,
+        heading: "Your trial is nearly up",
         body: [
-          `Your free trial for ${companyName} ends ${when}.`,
+          `Your trial for ${companyName} ends ${when}.`,
           `Choose a plan to keep collecting customer purchases without interruption. Your QR code stays exactly the same, so there is nothing to reprint and nothing for your customers to relearn.`,
           `Everything you have collected so far carries straight over.`,
         ],
@@ -66,10 +66,10 @@ function copyFor(
       };
     case "trial_ended":
       return {
-        subject: `Your ${brand} free trial has ended`,
-        heading: "Your free trial has ended",
+        subject: `Your ${brand} trial has ended`,
+        heading: "Your trial has ended",
         body: [
-          `The free trial for ${companyName} ended ${when}, so your QR code has stopped accepting new submissions and your dashboard is paused.`,
+          `The trial for ${companyName} ended ${when}, so your QR code has stopped accepting new submissions and your dashboard is paused.`,
           `Choose a plan and everything picks up exactly where it left off — same QR code, same customer list, nothing to set up again.`,
           `Your data is kept for ${retentionDays} days. Within that time you can renew and have it all back, or download it from your account. After ${retentionDays} days it is deleted.`,
         ],
