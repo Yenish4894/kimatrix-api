@@ -3,7 +3,7 @@ import { AppDataSource } from "data-source";
 import type { Company } from "@/entities/Company";
 import type { Plan } from "@/entities/Plan";
 import { Subscription, type SubscriptionState } from "@/entities/Subscription";
-import { returningRows } from "@/utils/db";
+import { affectedRows, returningRows } from "@/utils/db";
 
 /** The locked subscription row applyRemoteState works from. snake_case: straight from SQL. */
 export interface LockedSubscriptionRow {
@@ -66,6 +66,44 @@ export class SubscriptionRepository {
       status: "pending",
     });
     return manager.getRepository(Subscription).save(row);
+  }
+
+  /**
+   * Moves rows that can never go live again out of the one-live-per-company index, which
+   * they otherwise hold for good:
+   *
+   *  - `pending_cancel` once the paid time is over → `cancelled`. PayPal's CANCELLED is
+   *    kept as pending_cancel on purpose, and nothing ever moved it on, so a customer
+   *    who cancelled could never subscribe again.
+   *  - `pending` older than 3 hours → `expired`. PayPal's approval link is short-lived;
+   *    a buyer who closed the PayPal tab left a row that blocked every retry.
+   *
+   * All companies (the hourly cron) or one (subscribe, so it need not wait for the cron).
+   */
+  async retireDeadRows(manager: EntityManager, companyId: string | null = null): Promise<number> {
+    const result: unknown = await manager.query(
+      `UPDATE "subscriptions" s
+          SET "status" = CASE s."status" WHEN 'pending_cancel' THEN 'cancelled' ELSE 'expired' END,
+              "updated_at" = now()
+         FROM "companies" c
+        WHERE c."id" = s."company_id"
+          AND ($1::uuid IS NULL OR s."company_id" = $1::uuid)
+          AND ((s."status" = 'pending' AND s."created_at" < now() - interval '3 hours')
+            OR (s."status" = 'pending_cancel'
+                AND (c."subscription_expires_at" IS NULL OR c."subscription_expires_at" <= now())))`,
+      [companyId],
+    );
+    return affectedRows(result);
+  }
+
+  /** PayPal ids of every subscription PayPal may still bill or change, for the daily reconcile. */
+  async findPaypalIdsToReconcile(): Promise<string[]> {
+    const rows = (await AppDataSource.query(
+      `SELECT "paypal_subscription_id" FROM "subscriptions"
+        WHERE "status" IN ('active', 'past_due', 'pending_cancel')
+          AND "paypal_subscription_id" IS NOT NULL`,
+    )) as { paypal_subscription_id: string }[];
+    return rows.map((r) => r.paypal_subscription_id);
   }
 
   async update(

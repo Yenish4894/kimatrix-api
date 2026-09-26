@@ -4,6 +4,7 @@ import { logger } from "@/utils/logger";
 import { runExclusive } from "@/cron/runTracker";
 import { AdvisoryLockRepository } from "@/repositories/AdvisoryLockRepository";
 import { CompanyRepository, EXPIRY_NOTICE_KINDS } from "@/repositories/CompanyRepository";
+import { SubscriptionRepository } from "@/repositories/SubscriptionRepository";
 import { EmailService } from "@/services/EmailService";
 
 /**
@@ -36,6 +37,10 @@ export async function reconcileSubscriptionStatuses(): Promise<number> {
       logger.debug("Subscription status reconcile skipped — another instance holds the lock");
       return 0;
     }
+    // Frees the one-live-subscription slot held by rows that can never go live again,
+    // so a customer whose cancelled plan has run out can subscribe again.
+    const retired = await new SubscriptionRepository().retireDeadRows(manager);
+    if (retired > 0) logger.info({ retired }, "Retired ended/abandoned subscription rows");
     return companyRepository.reconcileSubscriptionStatuses(manager);
   });
 }

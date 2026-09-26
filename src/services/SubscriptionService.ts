@@ -18,6 +18,9 @@ import { billingStartTime, saleMatchesPlan, subscriptionBelongsTo } from "@/util
 /** Same system-actor convention as PaypalWebhookService: no user, this marker instead. */
 const SYSTEM_ACTOR_EMAIL = "system:paypal-webhook";
 
+/** How far back the daily reconcile looks for completed renewal sales. */
+const RECONCILE_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1000;
+
 export interface SubscribeResult {
   subscriptionId: string;
   approvalUrl: string;
@@ -86,8 +89,16 @@ export class SubscriptionService {
       throw BadRequestError("That plan cannot be subscribed to. Please choose another.");
     }
 
+    // A cancelled subscription whose paid time is over no longer blocks: it is retired
+    // below. While time remains it still does, as the billing page expects.
     const live = company.currentSubscription;
-    if (live && ["pending", "active", "past_due", "pending_cancel"].includes(live.status)) {
+    const paidTimeOver =
+      !company.subscriptionExpiresAt || company.subscriptionExpiresAt <= new Date();
+    if (
+      live &&
+      (["pending", "active", "past_due"].includes(live.status) ||
+        (live.status === "pending_cancel" && !paidTimeOver))
+    ) {
       throw ConflictError(
         "You already have a subscription. Change your plan instead of starting a new one.",
       );
@@ -103,9 +114,24 @@ export class SubscriptionService {
     // Create the local row FIRST, inside a transaction. The partial unique index
     // `uq_subscriptions_one_live_per_company` is what stops two tabs both reaching
     // PayPal — the second insert fails before any money is involved.
-    const local = await this.db.transaction(async (manager) =>
-      this.subscriptionRepository.createPending(companyId, planId, manager),
-    );
+    //
+    // Rows that can never go live again (an ended pending_cancel, an approval abandoned
+    // hours ago) are retired first; otherwise they held that index forever.
+    const local = await this.db
+      .transaction(async (manager) => {
+        await this.subscriptionRepository.retireDeadRows(manager, companyId);
+        return this.subscriptionRepository.createPending(companyId, planId, manager);
+      })
+      .catch((err: unknown) => {
+        const pg = err as { code?: string; driverError?: { code?: string } };
+        if (pg?.code === "23505" || pg?.driverError?.code === "23505") {
+          // A recent approval still open in another tab, or a double click.
+          throw ConflictError(
+            "A subscription is already waiting for PayPal approval. Finish it there, or try again in a few hours.",
+          );
+        }
+        throw err;
+      });
 
     const base = config.FRONTEND_BASE_URL.replace(/\/$/, "");
     try {
@@ -431,6 +457,48 @@ export class SubscriptionService {
     // if the receipt cannot be queued.
     if (credited) void this.notificationService.sendPaymentReceipt(credited);
     return credited !== null;
+  }
+
+  /**
+   * The backstop for lost webhooks. Renewals, suspensions and cancellations otherwise
+   * reach us ONLY by webhook, so one lost event (PayPal's verify API down, a crash, a
+   * misconfigured endpoint) was never noticed: a paid renewal not credited, a suspended
+   * subscription still shown active.
+   *
+   * For each subscription PayPal may still bill: re-read its state, then credit any
+   * completed sale from the last few days. Both steps are the webhook's own code paths
+   * and are idempotent (creditCycle dedupes on the sale id), so a sale the webhook
+   * already credited is a no-op. One subscription failing does not stop the rest.
+   */
+  async reconcileWithPaypal(
+    now = new Date(),
+  ): Promise<{ checked: number; credited: number; errors: number }> {
+    const ids = await this.subscriptionRepository.findPaypalIdsToReconcile();
+    // Wider than a day so a run missed to a deploy or outage is still covered.
+    const from = new Date(now.getTime() - RECONCILE_LOOKBACK_MS);
+    let credited = 0;
+    let errors = 0;
+    for (const id of ids) {
+      try {
+        const remote = await this.paypalService.getSubscription(id);
+        // No event time: this is a fresh read, not a possibly stale webhook body.
+        if (remote) await this.applyRemoteState(id, remote);
+        const sales = await this.paypalService.listSubscriptionSales(id, from, now);
+        for (const sale of sales) {
+          if (await this.creditCycle({ paypalSubscriptionId: id, ...sale })) {
+            credited++;
+            logger.warn(
+              { paypalSubscriptionId: id, saleId: sale.saleId },
+              "Reconcile credited a missed renewal",
+            );
+          }
+        }
+      } catch (err) {
+        errors++;
+        logger.error({ err, paypalSubscriptionId: id }, "Subscription reconcile failed");
+      }
+    }
+    return { checked: ids.length, credited, errors };
   }
 
   /**

@@ -2,6 +2,7 @@ import cron, { type ScheduledTask } from "node-cron";
 import { AppDataSource } from "data-source";
 import { AdvisoryLockRepository } from "@/repositories/AdvisoryLockRepository";
 import { PaymentService } from "@/services/PaymentService";
+import { SubscriptionService } from "@/services/SubscriptionService";
 import { logger } from "@/utils/logger";
 import { runExclusive } from "@/cron/runTracker";
 
@@ -15,7 +16,31 @@ const SCHEDULE = "*/10 * * * *";
 /** Distinct from every other cron's key so none of them block each other. */
 const ADVISORY_LOCK_KEY = 4_820_119;
 
+/** Daily at 03:20 UTC: subscriptions checked against PayPal (see reconcileWithPaypal). */
+const SUBSCRIPTION_SCHEDULE = "20 3 * * *";
+const SUBSCRIPTION_LOCK_KEY = 4_820_120;
+
 let task: ScheduledTask | null = null;
+let subscriptionTask: ScheduledTask | null = null;
+
+/** Same session-lock pattern as reconcileStuckPayments. Null when another instance runs it. */
+export async function reconcileSubscriptions(): Promise<Awaited<
+  ReturnType<SubscriptionService["reconcileWithPaypal"]>
+> | null> {
+  const locks = new AdvisoryLockRepository();
+  const runner = AppDataSource.createQueryRunner();
+  await runner.connect();
+  try {
+    if (!(await locks.trySessionLock(runner, SUBSCRIPTION_LOCK_KEY))) return null;
+    try {
+      return await new SubscriptionService().reconcileWithPaypal();
+    } finally {
+      await locks.sessionUnlock(runner, SUBSCRIPTION_LOCK_KEY);
+    }
+  } finally {
+    await runner.release();
+  }
+}
 
 /**
  * Settles payments stuck in `capturing`. Returns null when another instance holds the
@@ -67,13 +92,28 @@ export function startPaymentReconcileCron(): void {
     },
     { timezone: "UTC" },
   );
-  logger.info({ schedule: SCHEDULE }, "Payment reconcile cron started");
+  subscriptionTask = cron.schedule(
+    SUBSCRIPTION_SCHEDULE,
+    async () => {
+      await runExclusive("subscriptionReconcile", async () => {
+        const result = await reconcileSubscriptions();
+        if (result) logger.info(result, "Subscription reconcile completed");
+      });
+    },
+    { timezone: "UTC" },
+  );
+  logger.info(
+    { schedule: SCHEDULE, subscriptionSchedule: SUBSCRIPTION_SCHEDULE },
+    "Payment reconcile cron started",
+  );
 }
 
 export function stopPaymentReconcileCron(): void {
   if (task) {
     task.stop();
     task = null;
+    subscriptionTask?.stop();
+    subscriptionTask = null;
     logger.info("Payment reconcile cron stopped");
   }
 }
