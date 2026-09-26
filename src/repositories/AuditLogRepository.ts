@@ -154,6 +154,8 @@ export class AuditLogRepository {
       before: Record<string, unknown>;
       after: Record<string, unknown>;
       note: string;
+      /** Default `payment.amount_mismatch`. At most one row per (action, sale). */
+      action?: string;
     },
   ): Promise<void> {
     await manager.query(
@@ -163,10 +165,10 @@ export class AuditLogRepository {
                 "before", "after", "note")
              -- Explicit casts: parameters in a SELECT list are not typed from the
              -- target columns the way VALUES parameters are.
-             SELECT NULL::uuid, $1::varchar, 'payment.amount_mismatch', 'paypal_sale',
+             SELECT NULL::uuid, $1::varchar, $6::varchar, 'paypal_sale',
                     $2::varchar, $3::jsonb, $4::jsonb, $5::varchar
               WHERE NOT EXISTS (SELECT 1 FROM "admin_audit_log"
-                                 WHERE "action" = 'payment.amount_mismatch'
+                                 WHERE "action" = $6::varchar
                                    AND "entity_id" = $2::varchar)`,
       [
         entry.actorEmail,
@@ -174,6 +176,7 @@ export class AuditLogRepository {
         JSON.stringify(entry.before),
         JSON.stringify(entry.after),
         entry.note,
+        entry.action ?? "payment.amount_mismatch",
       ],
     );
   }

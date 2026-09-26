@@ -17,6 +17,7 @@ export interface LockedSubscriptionRow {
 export interface LockedCycleRow {
   id: string;
   company_id: string;
+  status: SubscriptionState;
   plan_id: string;
   trial_ends_at: Date | null;
 }
@@ -104,6 +105,24 @@ export class SubscriptionRepository {
           AND ($1::uuid IS NULL OR "company_id" = $1::uuid)`,
       [companyId],
     )) as { id: string; paypal_subscription_id: string | null }[];
+  }
+
+  /** Whether the company has a live subscription other than this one. */
+  async hasOtherLive(
+    companyId: string,
+    excludeId: string,
+    manager: EntityManager,
+  ): Promise<boolean> {
+    const rows = returningRows<{ id: string }>(
+      await manager.query(
+        `SELECT "id" FROM "subscriptions"
+          WHERE "company_id" = $1 AND "id" <> $2
+            AND "status" IN ('pending', 'active', 'past_due', 'pending_cancel')
+          LIMIT 1`,
+        [companyId, excludeId],
+      ),
+    );
+    return rows.length > 0;
   }
 
   /** `pending` → `expired`, only if it is still pending. */
@@ -200,7 +219,7 @@ export class SubscriptionRepository {
   ): Promise<LockedCycleRow | undefined> {
     return returningRows<LockedCycleRow>(
       await manager.query(
-        `SELECT s."id", s."company_id", s."plan_id", c."trial_ends_at"
+        `SELECT s."id", s."company_id", s."status", s."plan_id", c."trial_ends_at"
              FROM "subscriptions" s
              JOIN "companies" c ON c."id" = s."company_id"
             WHERE s."paypal_subscription_id" = $1

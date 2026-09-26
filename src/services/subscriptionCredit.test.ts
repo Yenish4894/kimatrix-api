@@ -31,7 +31,7 @@ const db: TransactionRunner = {
 
 const PLAN = { id: "plan-30", duration_days: 30, price: "29.00", currency: "USD" };
 
-function harness() {
+function harness(opts: { status?: string; otherLive?: boolean } = {}) {
   const calls: [string, ...unknown[]][] = [];
   const starts = new Date("2026-09-13T00:00:00Z");
   const ends = new Date("2026-10-13T00:00:00Z");
@@ -41,13 +41,27 @@ function harness() {
       calls.push(["getSubscription", id]);
       return { plan_id: "P-REMOTE" };
     },
+    cancelSubscription: async (id: string, reason: string) => {
+      calls.push(["cancelAtPaypal", id, reason]);
+    },
   } as unknown as PaypalService;
 
   const subscriptionRepository = {
     lockForCycleCredit: async (paypalId: string, m: EntityManager) => {
       assert.equal(m, tx);
       calls.push(["lockForCycleCredit", paypalId]);
-      return { id: "sub-1", company_id: "co-1", plan_id: "plan-30", trial_ends_at: null };
+      return {
+        id: "sub-1",
+        company_id: "co-1",
+        plan_id: "plan-30",
+        trial_ends_at: null,
+        ...(opts.status ? { status: opts.status } : {}),
+      };
+    },
+    hasOtherLive: async (companyId: string, excludeId: string, m: EntityManager) => {
+      assert.equal(m, tx);
+      calls.push(["hasOtherLive", companyId, excludeId]);
+      return opts.otherLive ?? false;
     },
     findCyclePlan: async (params: Record<string, unknown>, m: EntityManager) => {
       assert.equal(m, tx);
@@ -219,5 +233,55 @@ describe("SubscriptionService.creditCycle — amount mismatch", () => {
     assert.deepEqual(named(calls, "setWindow"), [["setWindow", "pay-1", starts, ends]]);
     assert.deepEqual(named(calls, "clearNotice"), [["clearNotice", "co-1"]]);
     assert.deepEqual(named(calls, "receipt"), [["receipt", "pay-1", "co-1"]]);
+  });
+});
+
+describe("SubscriptionService.creditCycle — duplicate subscription", () => {
+  it("a sale on an expired row while a newer subscription is live is flagged, not credited, and cancelled", async () => {
+    const { service, calls } = harness({ status: "expired", otherLive: true });
+
+    const credited = await service.creditCycle({
+      paypalSubscriptionId: "I-OLD",
+      saleId: "SALE-DUP",
+      amount: "29.00",
+      currency: "USD",
+    });
+
+    assert.equal(credited, false);
+    const [[, entry]] = named(calls, "auditMismatch") as [[string, Record<string, unknown>]];
+    assert.equal(entry["action"], "payment.duplicate_subscription");
+    assert.equal(entry["saleId"], "SALE-DUP");
+    assert.deepEqual(
+      named(calls, "cancelAtPaypal").map(([, id]) => id),
+      ["I-OLD"],
+    );
+    for (const name of ["insertCycle", "extendSubscription", "subscriptionUpdate", "receipt"]) {
+      assert.equal(named(calls, name).length, 0, `${name} must not run for a duplicate`);
+    }
+  });
+
+  it("an expired row with nothing else live is credited as usual (revived, not a duplicate)", async () => {
+    const { service, calls } = harness({ status: "expired", otherLive: false });
+    const credited = await service.creditCycle({
+      paypalSubscriptionId: "I-OLD",
+      saleId: "SALE-REVIVE",
+      amount: "29.00",
+      currency: "USD",
+    });
+    assert.equal(credited, true);
+    assert.equal(named(calls, "cancelAtPaypal").length, 0);
+    assert.equal(named(calls, "insertCycle").length, 1);
+  });
+
+  it("a live row never asks whether another subscription is live", async () => {
+    const { service, calls } = harness({ status: "active", otherLive: true });
+    await service.creditCycle({
+      paypalSubscriptionId: "I-SUB",
+      saleId: "SALE-LIVE",
+      amount: "29.00",
+      currency: "USD",
+    });
+    assert.equal(named(calls, "hasOtherLive").length, 0);
+    assert.equal(named(calls, "insertCycle").length, 1);
   });
 });

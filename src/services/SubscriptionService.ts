@@ -18,6 +18,21 @@ import { billingStartTime, saleMatchesPlan, subscriptionBelongsTo } from "@/util
 /** Same system-actor convention as PaypalWebhookService: no user, this marker instead. */
 const SYSTEM_ACTOR_EMAIL = "system:paypal-webhook";
 
+/**
+ * Rows we retired ourselves (an abandoned approval, an ended cancellation). PayPal can
+ * still bring one back to life: an approval link stays usable after we expire the row,
+ * and PayPal refuses to cancel a subscription that is still APPROVAL_PENDING (probed in
+ * the sandbox: 404). If the company has meanwhile subscribed again, the revived one is
+ * a duplicate: it is cancelled at PayPal and any charge on it is flagged, not credited.
+ */
+const RETIRED_STATUSES: ReadonlySet<string> = new Set(["expired", "cancelled"]);
+const LIVE_STATUSES: ReadonlySet<string> = new Set([
+  "pending",
+  "active",
+  "past_due",
+  "pending_cancel",
+]);
+
 /** How far back the daily reconcile looks for completed renewal sales. */
 const RECONCILE_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1000;
 
@@ -213,6 +228,7 @@ export class SubscriptionService {
     },
     eventTime?: Date,
   ): Promise<void> {
+    let duplicate = false;
     await this.db.transaction(async (manager) => {
       // Raw locking read rather than a QueryBuilder with joins — see
       // SubscriptionRepository: FOR UPDATE cannot sit on the nullable side of a LEFT
@@ -248,6 +264,22 @@ export class SubscriptionService {
         status = "pending_cancel";
       }
 
+      // A retired row PayPal has brought back while a newer subscription is live: a
+      // duplicate. Reviving it would break the one-live-per-company index on every
+      // retry, so it stays retired and is cancelled at PayPal below.
+      if (
+        RETIRED_STATUSES.has(sub.status) &&
+        LIVE_STATUSES.has(status) &&
+        (await this.subscriptionRepository.hasOtherLive(sub.company_id, sub.id, manager))
+      ) {
+        duplicate = true;
+        logger.error(
+          { paypalSubscriptionId, subscriptionId: sub.id, companyId: sub.company_id },
+          "Duplicate PayPal subscription revived a retired row — cancelling it at PayPal",
+        );
+        return;
+      }
+
       const nextBilling = remote.billing_info?.next_billing_time
         ? new Date(remote.billing_info.next_billing_time)
         : null;
@@ -278,6 +310,15 @@ export class SubscriptionService {
 
       logger.info({ paypalSubscriptionId, status }, "Subscription state applied");
     });
+
+    // After commit. A throw here (PayPal down) fails the webhook, so PayPal retries and
+    // this runs again until the duplicate is cancelled.
+    if (duplicate) {
+      await this.paypalService.cancelSubscription(
+        paypalSubscriptionId,
+        "Duplicate subscription: replaced by a newer one",
+      );
+    }
   }
 
   /**
@@ -309,6 +350,7 @@ export class SubscriptionService {
 
     // The newly credited payment, or null for an unknown subscription or a replay. Only a
     // real credit gets a receipt, and only once the credit has committed.
+    let duplicate = false;
     const credited = await this.db.transaction(
       async (
         manager: EntityManager,
@@ -325,6 +367,35 @@ export class SubscriptionService {
         );
         if (!locked) {
           logger.warn({ ...params }, "Cycle payment for an unknown subscription");
+          return null;
+        }
+
+        // A charge on a duplicate (a retired row PayPal revived while a newer
+        // subscription is live). Money moved, so it is recorded for an admin to refund:
+        // not credited, and not thrown (PayPal would retry forever), exactly like an
+        // amount mismatch.
+        if (
+          RETIRED_STATUSES.has(locked.status) &&
+          (await this.subscriptionRepository.hasOtherLive(locked.company_id, locked.id, manager))
+        ) {
+          duplicate = true;
+          await this.auditLogRepository.insertAmountMismatchOnce(manager, {
+            actorEmail: SYSTEM_ACTOR_EMAIL,
+            action: "payment.duplicate_subscription",
+            saleId: params.saleId.slice(0, 64),
+            before: { subscriptionId: locked.id, status: locked.status },
+            after: {
+              amount: params.amount,
+              currency: params.currency,
+              paypalSubscriptionId: params.paypalSubscriptionId,
+              companyId: locked.company_id,
+            },
+            note: "Charged on a duplicate subscription (a newer one is live). NOT credited; cancelled at PayPal. Refund this sale.",
+          });
+          logger.error(
+            { saleId: params.saleId, companyId: locked.company_id, subscriptionId: locked.id },
+            "Sale on a duplicate subscription — NOT credited, needs a refund",
+          );
           return null;
         }
 
@@ -454,6 +525,19 @@ export class SubscriptionService {
       },
     );
 
+    // Best effort: the sale is already flagged, and the next sale or state event on this
+    // subscription retries the cancel.
+    if (duplicate) {
+      await this.paypalService
+        .cancelSubscription(
+          params.paypalSubscriptionId,
+          "Duplicate subscription: replaced by a newer one",
+        )
+        .catch((err: unknown) => {
+          logger.error({ err, ...params }, "Could not cancel a duplicate subscription at PayPal");
+        });
+    }
+
     // Never awaited, never throws: the webhook must answer 2xx for a credited cycle even
     // if the receipt cannot be queued.
     if (credited) void this.notificationService.sendPaymentReceipt(credited);
@@ -464,8 +548,11 @@ export class SubscriptionService {
    * Expires `pending` rows over 3 hours old whose approval was abandoned, so they stop
    * blocking a new subscribe. PayPal is asked first: a buyer who DID approve but whose
    * ACTIVATED webhook is still being retried must not have their paying subscription
-   * expired under them (it would then bill and never be credited). Approved → the
-   * state is applied instead; still APPROVAL_PENDING or unknown to PayPal → expired.
+   * expired under them. ACTIVE (or another billing state) → the state is applied
+   * instead. APPROVAL_PENDING, APPROVED (PayPal bills only ACTIVE, so no money has
+   * moved) or unknown to PayPal → expired locally. PayPal will not cancel an
+   * APPROVAL_PENDING subscription, so if the buyer uses the old link later, the
+   * duplicate guard in applyRemoteState/creditCycle cancels it and flags any charge.
    * A PayPal error skips the row until the next run.
    */
   async retireAbandonedApprovals(companyId: string | null = null): Promise<number> {
@@ -475,7 +562,9 @@ export class SubscriptionService {
       try {
         const paypalId = row.paypal_subscription_id;
         const remote = paypalId ? await this.paypalService.getSubscription(paypalId) : null;
-        if (paypalId && remote && remote.status !== "APPROVAL_PENDING") {
+        const abandoned =
+          !remote || remote.status === "APPROVAL_PENDING" || remote.status === "APPROVED";
+        if (paypalId && remote && !abandoned) {
           await this.applyRemoteState(paypalId, remote);
           continue;
         }
