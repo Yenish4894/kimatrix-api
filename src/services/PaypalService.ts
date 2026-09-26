@@ -327,6 +327,24 @@ export class PaypalService {
       throw new Error("PAYPAL_WEBHOOK_ID is not set — cannot verify PayPal webhooks");
     }
 
+    // PayPal always sends all five transmission headers and a JSON body. A request
+    // without them is not from PayPal: drop it here, without a PayPal call, and without
+    // the 5xx + error log a throw would cost for every junk request.
+    const headers = [
+      opts.transmissionId,
+      opts.transmissionTime,
+      opts.certUrl,
+      opts.authAlgo,
+      opts.transmissionSig,
+    ];
+    if (headers.some((h) => !h)) return "invalid";
+    let webhookEvent: unknown;
+    try {
+      webhookEvent = JSON.parse(opts.rawBody);
+    } catch {
+      return "invalid";
+    }
+
     const token = await this.getAccessToken();
 
     const res = await fetchWithTimeout(
@@ -344,11 +362,15 @@ export class PaypalService {
           auth_algo: opts.authAlgo,
           transmission_sig: opts.transmissionSig,
           webhook_id: config.PAYPAL_WEBHOOK_ID,
-          webhook_event: JSON.parse(opts.rawBody) as unknown,
+          webhook_event: webhookEvent,
         }),
       },
     );
 
+    // 400/422: PayPal rejected the headers themselves as malformed — forged, and no
+    // retry will change that. Anything else (401 token, 429, 5xx) is on our side or
+    // PayPal's, so throw and let PayPal retry.
+    if (res.status === 400 || res.status === 422) return "invalid";
     if (!res.ok) {
       throw new Error(`PayPal verify-webhook-signature failed with HTTP ${res.status}`);
     }
@@ -519,16 +541,6 @@ export class PaypalService {
   }
 
   /**
-   * The authoritative state. Always read this back rather than trusting a webhook body.
-   *
-   * A 404 returns `null` instead of throwing, and the distinction is load-bearing on
-   * the webhook path. Every other failure is transient, so the caller rethrows and
-   * PayPal retries — but a subscription PayPal itself does not recognise will never
-   * start existing, so treating that as retryable means retrying forever. Observed for
-   * real: PayPal's webhook simulator sends events referencing placeholder ids, and
-   * every one of them produced a 500 and an endless retry.
-   */
-  /**
    * Completed sales on a subscription in a time window, for reconciliation. The ids are
    * the same sale ids PAYMENT.SALE.COMPLETED delivers, so crediting them goes through
    * creditCycle's unique-sale-id guard and a sale already credited is a no-op.
@@ -568,6 +580,16 @@ export class PaypalService {
       }));
   }
 
+  /**
+   * The authoritative state. Always read this back rather than trusting a webhook body.
+   *
+   * A 404 returns `null` instead of throwing, and the distinction is load-bearing on
+   * the webhook path. Every other failure is transient, so the caller rethrows and
+   * PayPal retries — but a subscription PayPal itself does not recognise will never
+   * start existing, so treating that as retryable means retrying forever. Observed for
+   * real: PayPal's webhook simulator sends events referencing placeholder ids, and
+   * every one of them produced a 500 and an endless retry.
+   */
   async getSubscription(subscriptionId: string): Promise<PaypalSubscriptionResource | null> {
     const token = await this.getAccessToken();
     const res = await fetchWithTimeout(
