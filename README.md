@@ -479,6 +479,24 @@ FRONTEND_BASE_URL=https://kimates.com
 The API is reverse-proxied under the main domain at `/api` — there is no `api.*`
 subdomain, and `api.kimates.com` does not resolve.
 
+### PayPal go-live (sandbox → live)
+
+Every stored PayPal id (billing plans, the product, subscriptions) belongs to the
+sandbox account and is "not found" on live. Switch in one sitting:
+
+1. In the live PayPal dashboard, create a webhook for
+   `https://kimates.com/api/payments/paypal/webhook` (all payment, billing-subscription
+   and dispute events) and note its id.
+2. On the server, set `PAYPAL_MODE=live`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` and
+   `PAYPAL_WEBHOOK_ID` **together**, then `pm2 restart kimatrix-api --update-env`.
+3. Recreate the plans on live:
+   `node dist/scripts/sync-paypal-plans.js --reset --dry-run`, check the list, then run
+   it again without `--dry-run`. Until this finishes, plans are offered as one-time only.
+4. Close out sandbox rows so the reconcile job stops asking live PayPal about them:
+   `UPDATE subscriptions SET status = 'cancelled' WHERE status IN ('pending','active','past_due','pending_cancel');`
+5. Make a real low-value purchase and a subscription, check both show in Billing, then
+   refund them from the PayPal dashboard and check access is taken back.
+
 ---
 
 ## 🤝 Contributing

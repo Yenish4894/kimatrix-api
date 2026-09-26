@@ -21,10 +21,17 @@ import { config } from "@/config/index";
  * PayPal call carries a deterministic `PayPal-Request-Id` so a retry after a timeout
  * returns the original object rather than making a second one.
  *
- * Usage:  npm run build && node dist/scripts/sync-paypal-plans.js [--dry-run]
+ * Usage:  npm run build && node dist/scripts/sync-paypal-plans.js [--dry-run] [--reset]
+ *
+ * `--reset` is for switching PayPal environment (sandbox → live). Stored plan and product
+ * ids belong to the account that created them, so after the switch every one of them is
+ * "not found" and nobody can subscribe. It clears the ids on EVERY plan (archived ones
+ * too, so a later re-activation cannot resurrect a sandbox id) and creates them afresh
+ * on the account now configured. See the go-live runbook in README.md.
  */
 
 const DRY_RUN = process.argv.includes("--dry-run");
+const RESET = process.argv.includes("--reset");
 
 /**
  * Maps a plan duration in days onto a PayPal billing frequency.
@@ -50,6 +57,19 @@ async function main(): Promise<void> {
   const paypal = new PaypalService();
   const repo = AppDataSource.getRepository(Plan);
 
+  if (RESET) {
+    if (DRY_RUN) {
+      console.log("[sync] would clear every stored PayPal plan/product id (--reset)");
+    } else {
+      // Not recurring until re-created below: a plan whose creation fails must not be
+      // offered as a subscription that then fails at checkout.
+      await AppDataSource.query(
+        `UPDATE "plans" SET "paypal_plan_id" = NULL, "paypal_product_id" = NULL, "is_recurring" = false`,
+      );
+      console.log(`[sync] --reset: cleared stored PayPal ids; recreating on ${config.PAYPAL_MODE}`);
+    }
+  }
+
   // Only sellable plans: archived and disabled rows must never get a live PayPal plan.
   const plans = await repo
     .createQueryBuilder("p")
@@ -63,7 +83,8 @@ async function main(): Promise<void> {
     `[sync] ${config.PAYPAL_MODE} — ${plans.length} sellable plan(s)${DRY_RUN ? " (dry run)" : ""}`,
   );
 
-  const pending = plans.filter((p) => !p.paypalPlanId);
+  // A dry-run reset has not cleared anything, so it previews every plan as pending.
+  const pending = RESET ? plans : plans.filter((p) => !p.paypalPlanId);
   if (pending.length === 0) {
     console.log("[sync] every sellable plan already has a PayPal plan. Nothing to do.");
     await AppDataSource.destroy();
@@ -72,7 +93,7 @@ async function main(): Promise<void> {
 
   // One product for the whole platform. Reuse whichever id a plan already carries so a
   // second run does not create another.
-  let productId = plans.find((p) => p.paypalProductId)?.paypalProductId ?? null;
+  let productId = RESET ? null : (plans.find((p) => p.paypalProductId)?.paypalProductId ?? null);
   if (!productId) {
     if (DRY_RUN) {
       console.log("[sync] would create the catalog product");

@@ -80,6 +80,11 @@ function normalizePrice(raw: string): string {
   if (!Number.isFinite(value) || value < 0) {
     throw BadRequestError("Enter a valid price.");
   }
+  // Rounded as it will be stored, so "0.001" cannot sneak through as 0.00. PayPal
+  // refuses zero-value orders and billing plans, so a free plan could never be bought.
+  if (Number(value.toFixed(2)) <= 0) {
+    throw BadRequestError("The price must be more than zero.");
+  }
   if (value > PLAN_PRICE_MAX) {
     throw BadRequestError(`The price cannot exceed ${PLAN_PRICE_MAX.toLocaleString("en-US")}.`);
   }
