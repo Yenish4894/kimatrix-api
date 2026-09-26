@@ -209,17 +209,10 @@ See [`.env.example`](.env.example) for all available configuration options.
 
 ## 🗄️ Database Setup
 
-### Using Docker (Recommended)
+PostgreSQL and Redis must both be running locally (Redis backs the BullMQ email
+queue and the rate limiter). There is no Docker Compose file in this repo.
 
-```bash
-# Start PostgreSQL + Redis via Docker Compose
-docker-compose up -d
-
-# Verify containers are running
-docker ps
-```
-
-### Manual Setup
+### Create the database
 
 ```bash
 # Create database
@@ -246,10 +239,11 @@ npm run migration:revert
 
 ### Seed Data
 
-```bash
-# Seed subscription plans (7/15/21/30 day in USD)
-npm run seed:plans
+The initial plans (7/15/21/30 days, USD) are inserted by the first migration, so
+`npm run migration:run` is all a fresh database needs. After that, plans are managed
+from the admin panel.
 
+```bash
 # Create first super admin
 npm run seed:superadmin -- --email admin@kimates.com --password 'YourStrongPassword123!'
 ```
@@ -452,25 +446,19 @@ backend/
 
 ## 🚀 Deployment
 
-### Docker Deployment
+Pushing to `main` deploys to production automatically via
+`.github/workflows/deploy.yml`. It runs the test suite first, then over SSH:
+`npm ci` → `npm run build` → `npm run migration:run` → `pm2 restart kimatrix-api`,
+and finally waits for `GET /ready` to answer. A failed build or migration restores
+the previous `dist/` and leaves the running server untouched.
 
-```bash
-# Build Docker image
-docker build -t kimates-api:latest .
-
-# Run container
-docker run -d \
-  --name kimates-api \
-  -p 5000:5000 \
-  --env-file .env \
-  kimates-api:latest
-```
+Note: because migrations run on every deploy, **a push to `main` changes the live
+database schema**.
 
 ### Production Checklist
 
 - [ ] Set `NODE_ENV=production`
 - [ ] Run migrations: `npm run migration:run`
-- [ ] Seed plans: `npm run seed:plans`
 - [ ] Create super admin: `npm run seed:superadmin`
 - [ ] Configure reverse proxy (nginx)
 - [ ] Set up SSL certificate

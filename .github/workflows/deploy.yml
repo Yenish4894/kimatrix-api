@@ -5,7 +5,23 @@ on:
     branches: [main]
 
 jobs:
+  # Gate: nothing reaches the server unless the suite and the linter pass.
+  # The tests need no database or Redis, so a plain runner is enough.
+  # Node 24 matches production.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to VPS
