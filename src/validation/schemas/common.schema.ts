@@ -83,10 +83,6 @@ export const addressFields = {
   }),
 };
 
-export const idParamsSchema = Joi.object({
-  id: commonPatterns.uuid.required(),
-}).required();
-
 export const paginationSchema = Joi.object({
   // Bounded: `?page=999999999` becomes OFFSET 9999999980 on a joined
   // getManyAndCount, holding a pool connection while Postgres walks and discards the

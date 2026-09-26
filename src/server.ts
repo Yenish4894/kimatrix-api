@@ -1,4 +1,6 @@
 import "reflect-metadata";
+// Deliberately first (also loaded in config/index.ts): guarantees .env is in
+// process.env before any module in the app graph below reads it at import time.
 import "dotenv/config";
 import app from "@/app";
 import { config, validateConfig, isProduction } from "@/config/index";

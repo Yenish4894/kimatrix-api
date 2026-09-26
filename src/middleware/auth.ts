@@ -66,33 +66,6 @@ export async function authMiddleware(
   }
 }
 
-export async function optionalAuthMiddleware(
-  req: Request,
-  _res: Response,
-  next: NextFunction,
-): Promise<void> {
-  try {
-    const raw = extractBearerToken(req);
-    if (!raw) {
-      next();
-      return;
-    }
-    const payload = tokenService.verifyAccessToken(raw);
-    if (await tokenService.isAccessTokenRevoked(raw)) {
-      next();
-      return;
-    }
-    const user = await userRepository.findById(payload.sub);
-    if (user && user.isActive) {
-      req.user = user;
-    }
-    next();
-  } catch {
-    // Swallow — optional auth never blocks the request
-    next();
-  }
-}
-
 /**
  * Establishes company context. Blocks ONLY admin-deactivated accounts.
  *

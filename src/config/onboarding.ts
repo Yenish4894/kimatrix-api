@@ -12,12 +12,3 @@
  * no change to the confirm endpoint.
  */
 export const INVITE_TTL_HOURS = 72;
-
-/**
- * Default length of the complimentary period offered in the onboarding form.
- *
- * A year, and editable. Perpetual comp (`compedUntil = null`) is still supported by
- * `computeEntitlement` and an admin can switch to it later; the default is dated so
- * that free access resurfaces for a decision instead of quietly becoming permanent.
- */
-export const DEFAULT_COMP_DAYS = 365;

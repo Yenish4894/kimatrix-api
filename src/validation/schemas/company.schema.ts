@@ -101,10 +101,6 @@ export const exportQuerySchema = Joi.object({
   }),
 });
 
-export interface ExportQueryInput {
-  format: "csv" | "json";
-}
-
 export const monthlyReportQuerySchema = Joi.object({
   // Bounded to plausible business years. Unbounded, `year=999999` builds a Date that
   // Postgres rejects and the request 500s instead of 400ing.

@@ -327,5 +327,3 @@ export function renderPurchasesPdf(rows: PurchaseRow[], ctx: ReportContext): Buf
 
   return finish(doc, assets);
 }
-
-export const REPORT_TITLES = TITLES;

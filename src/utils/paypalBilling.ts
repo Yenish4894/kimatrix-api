@@ -33,12 +33,6 @@ export type ReversalEventType =
   | "PAYMENT.CAPTURE.REVERSED"
   | "PAYMENT.CAPTURE.DENIED";
 
-export const REVERSAL_EVENT_TYPES: readonly ReversalEventType[] = [
-  "PAYMENT.CAPTURE.REFUNDED",
-  "PAYMENT.CAPTURE.REVERSED",
-  "PAYMENT.CAPTURE.DENIED",
-];
-
 type Json = Record<string, unknown>;
 
 function obj(value: unknown): Json | undefined {
