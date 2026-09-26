@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { billingStartTime, classifyReversal, reversalRefs, toCents } from "@/utils/paypalBilling";
+import {
+  billingStartTime,
+  classifyReversal,
+  reversalRefs,
+  toCents,
+  withoutPayerDetails,
+} from "@/utils/paypalBilling";
 
 describe("billingStartTime", () => {
   const now = new Date("2026-09-13T12:00:00Z");
@@ -85,7 +91,7 @@ describe("reversalRefs", () => {
         { rel: "up", href: "https://api.paypal.com/v2/payments/captures/CAP123" },
       ],
     });
-    assert.deepEqual(refs, { orderId: null, captureId: "CAP123" });
+    assert.deepEqual(refs, { orderId: null, captureId: "CAP123", saleId: null });
   });
 
   it("uses resource.id and the related order id for reversals", () => {
@@ -93,6 +99,70 @@ describe("reversalRefs", () => {
       id: "CAP9",
       supplementary_data: { related_ids: { order_id: "ORDER9" } },
     });
-    assert.deepEqual(refs, { orderId: "ORDER9", captureId: "CAP9" });
+    assert.deepEqual(refs, { orderId: "ORDER9", captureId: "CAP9", saleId: null });
+  });
+});
+
+// Shapes taken from a real sandbox PAYMENT.SALE.REFUNDED: amount.total/currency strings,
+// the refunded sale as `sale_id`, and no billing_agreement_id.
+describe("sale (renewal) reversals", () => {
+  const refund = { id: "REF1", sale_id: "SALE1", amount: { total: "29.99", currency: "USD" } };
+
+  it("finds the renewal by its sale id", () => {
+    assert.deepEqual(reversalRefs("PAYMENT.SALE.REFUNDED", refund), {
+      orderId: null,
+      captureId: null,
+      saleId: "SALE1",
+    });
+  });
+
+  it("falls back to the resource id when there is no sale_id", () => {
+    assert.equal(reversalRefs("PAYMENT.SALE.REVERSED", { id: "SALE2" }).saleId, "SALE2");
+  });
+
+  it("a refund of the whole sale is full, less is partial", () => {
+    assert.equal(classifyReversal("PAYMENT.SALE.REFUNDED", refund, "29.99"), "full");
+    const part = { ...refund, amount: { total: "10.00", currency: "USD" } };
+    assert.equal(classifyReversal("PAYMENT.SALE.REFUNDED", part, "29.99"), "partial");
+  });
+
+  it("an unreadable refund amount is partial, never full", () => {
+    assert.equal(classifyReversal("PAYMENT.SALE.REFUNDED", { sale_id: "S" }, "29.99"), "partial");
+  });
+
+  it("a chargeback is full", () => {
+    assert.equal(classifyReversal("PAYMENT.SALE.REVERSED", {}, "29.99"), "full");
+  });
+});
+
+describe("withoutPayerDetails", () => {
+  it("drops the buyer's details and keeps ids, amounts and statuses", () => {
+    const event = {
+      id: "WH-1",
+      event_type: "CHECKOUT.ORDER.COMPLETED",
+      resource: {
+        id: "ORDER1",
+        status: "COMPLETED",
+        payer: { email_address: "buyer@example.com", name: { given_name: "B" } },
+        subscriber: { email_address: "buyer@example.com" },
+        payment_source: { paypal: { email_address: "buyer@example.com" } },
+        purchase_units: [{ amount: { value: "29.99" }, shipping: { name: { full_name: "B" } } }],
+        disputed_transactions: [{ seller_transaction_id: "CAP1", buyer: { name: "B" } }],
+      },
+    };
+    const out = withoutPayerDetails(event);
+    assert.doesNotMatch(JSON.stringify(out), /buyer@example\.com|given_name|full_name|"buyer"/);
+    assert.equal(out.id, "WH-1");
+    assert.equal(out.resource.id, "ORDER1");
+    assert.equal(out.resource.status, "COMPLETED");
+    assert.deepEqual(out.resource.purchase_units, [{ amount: { value: "29.99" } }]);
+    assert.deepEqual(out.resource.disputed_transactions, [{ seller_transaction_id: "CAP1" }]);
+    // The original is not mutated: the handler still reads it after storing.
+    assert.ok(event.resource.payer);
+  });
+
+  it("leaves an event without a resource alone", () => {
+    const event: { id: string; resource?: Record<string, unknown> } = { id: "WH-2" };
+    assert.equal(withoutPayerDetails(event), event);
   });
 });

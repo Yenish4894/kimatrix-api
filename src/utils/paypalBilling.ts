@@ -31,7 +31,10 @@ export function billingStartTime(accessEndsAt: Date | null, now: Date): Date {
 export type ReversalEventType =
   | "PAYMENT.CAPTURE.REFUNDED"
   | "PAYMENT.CAPTURE.REVERSED"
-  | "PAYMENT.CAPTURE.DENIED";
+  | "PAYMENT.CAPTURE.DENIED"
+  // Subscription renewals are v1 "sales", not v2 captures.
+  | "PAYMENT.SALE.REFUNDED"
+  | "PAYMENT.SALE.REVERSED";
 
 type Json = Record<string, unknown>;
 
@@ -93,11 +96,20 @@ export function subscriptionBelongsTo(
  * REFUNDED delivers the refund, whose own id is useless to us; the capture is its
  * `rel: "up"` link. Either may carry `supplementary_data.related_ids.order_id`, which is
  * the cheapest match and is preferred when present.
+ *
+ * A sale refund/reversal (a subscription renewal) carries the sale it reverses as
+ * `sale_id` — the same id stored from PAYMENT.SALE.COMPLETED. It carries no
+ * `billing_agreement_id`, which is why these events used to be dropped.
  */
 export function reversalRefs(
   eventType: ReversalEventType,
   resource: Json,
-): { orderId: string | null; captureId: string | null } {
+): { orderId: string | null; captureId: string | null; saleId: string | null } {
+  if (eventType === "PAYMENT.SALE.REFUNDED" || eventType === "PAYMENT.SALE.REVERSED") {
+    const sale = resource["sale_id"] ?? resource["id"];
+    return { orderId: null, captureId: null, saleId: typeof sale === "string" ? sale : null };
+  }
+
   const related = obj(obj(resource["supplementary_data"])?.["related_ids"]);
   const orderId = typeof related?.["order_id"] === "string" ? related["order_id"] : null;
 
@@ -117,7 +129,30 @@ export function reversalRefs(
   } else if (typeof resource["id"] === "string") {
     captureId = resource["id"];
   }
-  return { orderId, captureId };
+  return { orderId, captureId, saleId: null };
+}
+
+/** Where a PayPal webhook resource carries the buyer's name, email, address or messages. */
+const PAYER_KEYS = ["payer", "subscriber", "payment_source", "shipping", "buyer", "messages"];
+
+/**
+ * A copy of a webhook event without the buyer's personal details, for storage in the
+ * idempotency ledger. Nothing we reprocess reads them; ids, amounts and statuses stay.
+ * Covers the resource and objects one level down (purchase_units[].shipping,
+ * disputed_transactions[].buyer).
+ */
+export function withoutPayerDetails<T extends { resource?: Json }>(event: T): T {
+  const resource = obj(event.resource);
+  if (!resource) return event;
+  const strip = (o: Json): Json =>
+    Object.fromEntries(Object.entries(o).filter(([k]) => !PAYER_KEYS.includes(k)));
+  const cleaned = Object.fromEntries(
+    Object.entries(strip(resource)).map(([k, v]) => [
+      k,
+      Array.isArray(v) ? v.map((item) => (obj(item) ? strip(item as Json) : item)) : v,
+    ]),
+  );
+  return { ...event, resource: cleaned };
 }
 
 /**
@@ -125,17 +160,23 @@ export function reversalRefs(
  *
  * REVERSED (chargeback) and DENIED always remove the full amount. A refund is full only
  * when PayPal's cumulative `total_refunded_amount` (falling back to this refund's own
- * amount) reaches what we recorded. Anything we cannot parse is treated as PARTIAL:
- * wrongly revoking a paying customer's access is worse than leaving it for a human.
+ * amount) reaches what we recorded. A sale refund carries only its own
+ * `amount.total`. Anything we cannot parse is treated as PARTIAL: wrongly revoking a
+ * paying customer's access is worse than leaving it for a human.
  */
 export function classifyReversal(
   eventType: ReversalEventType,
   resource: Json,
   paymentAmount: string | number,
 ): "full" | "partial" {
+  const paid = toCents(paymentAmount);
+  if (eventType === "PAYMENT.SALE.REFUNDED") {
+    const refunded = toCents(obj(resource["amount"])?.["total"]);
+    if (paid == null || refunded == null || paid <= 0) return "partial";
+    return refunded >= paid ? "full" : "partial";
+  }
   if (eventType !== "PAYMENT.CAPTURE.REFUNDED") return "full";
 
-  const paid = toCents(paymentAmount);
   const breakdown = obj(resource["seller_payable_breakdown"]);
   const total = toCents(obj(breakdown?.["total_refunded_amount"])?.["value"]);
   const single = toCents(obj(resource["amount"])?.["value"]);

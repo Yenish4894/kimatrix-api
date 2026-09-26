@@ -32,6 +32,29 @@ const CAPTURE_ISSUE_MESSAGES: Record<string, string> = {
   ORDER_ALREADY_CAPTURED: "This payment has already been completed.",
 };
 
+/**
+ * Capture answers that mean PayPal refused and no money moved, so the buyer can safely
+ * go back to PayPal and retry. ORDER_ALREADY_CAPTURED is deliberately NOT here: money
+ * did move, and the webhook or reconcile job must finalize that row.
+ */
+const NO_FUNDS_MOVED_ISSUES = new Set([
+  "INSTRUMENT_DECLINED",
+  "PAYER_CANNOT_PAY",
+  "PAYER_ACCOUNT_RESTRICTED",
+  "TRANSACTION_REFUSED",
+  "ORDER_NOT_APPROVED",
+]);
+
+/** PayPal definitively refused a capture; nothing was charged. */
+export class PaypalDeclinedError extends AppError {
+  constructor(
+    message: string,
+    public readonly issue: string,
+  ) {
+    super(message, 400, "BAD_REQUEST");
+  }
+}
+
 async function parsePaypalError(
   res: Response,
 ): Promise<{ name: string | undefined; issue: string | undefined; raw: string }> {
@@ -246,6 +269,9 @@ export class PaypalService {
         "PayPal capture failed",
       );
       const friendly = issue ? CAPTURE_ISSUE_MESSAGES[issue] : undefined;
+      if (friendly && issue && NO_FUNDS_MOVED_ISSUES.has(issue)) {
+        throw new PaypalDeclinedError(friendly, issue);
+      }
       if (friendly) throw BadRequestError(friendly);
       throw new AppError(
         "We couldn't complete your PayPal payment. Please try again.",
@@ -291,16 +317,14 @@ export class PaypalService {
     authAlgo: string;
     transmissionSig: string;
     rawBody: string;
-  }): Promise<boolean> {
-    // Without a configured webhook ID we cannot verify the signature. Fail
-    // loudly with a distinct message so this is never confused with a genuine
-    // verification failure (e.g. a spoofed/replayed event).
+  }): Promise<"valid" | "invalid"> {
+    // "invalid" is reserved for PayPal's own FAILURE verdict — a forged or tampered
+    // event, which is safe to acknowledge and drop. Everything that merely stops us
+    // reaching a verdict (no webhook id, PayPal's verify API down or rate-limiting us)
+    // THROWS: the controller then answers 5xx and PayPal retries. Returning false for
+    // those used to answer 200, and PayPal never resent the event.
     if (!config.PAYPAL_WEBHOOK_ID) {
-      logger.error(
-        "PAYPAL_WEBHOOK_ID is not set — PayPal webhook events cannot be verified and will be ignored. " +
-          "Create a webhook in the PayPal dashboard and set PAYPAL_WEBHOOK_ID.",
-      );
-      return false;
+      throw new Error("PAYPAL_WEBHOOK_ID is not set — cannot verify PayPal webhooks");
     }
 
     const token = await this.getAccessToken();
@@ -326,12 +350,11 @@ export class PaypalService {
     );
 
     if (!res.ok) {
-      logger.warn({ status: res.status }, "PayPal webhook verification request failed");
-      return false;
+      throw new Error(`PayPal verify-webhook-signature failed with HTTP ${res.status}`);
     }
 
     const data = (await res.json()) as { verification_status: string };
-    return data.verification_status === "SUCCESS";
+    return data.verification_status === "SUCCESS" ? "valid" : "invalid";
   }
 
   // ─── Subscriptions API ────────────────────────────────────────────────────
@@ -505,6 +528,46 @@ export class PaypalService {
    * real: PayPal's webhook simulator sends events referencing placeholder ids, and
    * every one of them produced a 500 and an endless retry.
    */
+  /**
+   * Completed sales on a subscription in a time window, for reconciliation. The ids are
+   * the same sale ids PAYMENT.SALE.COMPLETED delivers, so crediting them goes through
+   * creditCycle's unique-sale-id guard and a sale already credited is a no-op.
+   */
+  async listSubscriptionSales(
+    subscriptionId: string,
+    from: Date,
+    to: Date,
+  ): Promise<{ saleId: string; amount: string; currency: string }[]> {
+    const token = await this.getAccessToken();
+    const qs = `start_time=${encodeURIComponent(from.toISOString())}&end_time=${encodeURIComponent(to.toISOString())}`;
+    const res = await fetchWithTimeout(
+      `${this.baseUrl}/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}/transactions?${qs}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!res.ok) {
+      const { raw } = await parsePaypalError(res);
+      logger.error(
+        { status: res.status, body: raw, subscriptionId },
+        "PayPal transactions fetch failed",
+      );
+      throw new AppError("PayPal transactions unavailable", 502, PAYMENT_PROVIDER_ERROR);
+    }
+    const data = (await res.json()) as {
+      transactions?: {
+        id?: string;
+        status?: string;
+        amount_with_breakdown?: { gross_amount?: { value?: string; currency_code?: string } };
+      }[];
+    };
+    return (data.transactions ?? [])
+      .filter((t) => t.status === "COMPLETED" && typeof t.id === "string")
+      .map((t) => ({
+        saleId: t.id!,
+        amount: t.amount_with_breakdown?.gross_amount?.value ?? "",
+        currency: t.amount_with_breakdown?.gross_amount?.currency_code ?? "",
+      }));
+  }
+
   async getSubscription(subscriptionId: string): Promise<PaypalSubscriptionResource | null> {
     const token = await this.getAccessToken();
     const res = await fetchWithTimeout(

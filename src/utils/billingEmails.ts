@@ -58,8 +58,10 @@ export function refundDisplayAmount(
 ): { amount: string | null; currency: string } {
   if (extent === "full") return { amount: payment.amount, currency: payment.currency };
   const amount = obj(resource["amount"]);
-  const value = typeof amount?.["value"] === "string" ? amount["value"].trim() : null;
-  const code = amount?.["currency_code"];
+  // v2 captures say value/currency_code; v1 sales (renewals) say total/currency.
+  const raw = amount?.["value"] ?? amount?.["total"];
+  const value = typeof raw === "string" ? raw.trim() : null;
+  const code = amount?.["currency_code"] ?? amount?.["currency"];
   return {
     amount: value && MONEY.test(value) ? value : null,
     currency: typeof code === "string" && /^[A-Z]{3}$/.test(code) ? code : payment.currency,

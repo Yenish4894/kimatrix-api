@@ -122,6 +122,26 @@ export class AuditLogRepository {
   }
 
   /**
+   * A system-actor row about a PayPal dispute. No transaction: nothing else changes with
+   * it, and the webhook-event claim already stops the same event writing twice.
+   */
+  async insertDisputeEntry(entry: {
+    actorEmail: string;
+    action: string;
+    disputeId: string;
+    after: Record<string, unknown>;
+    note: string;
+  }): Promise<void> {
+    await AppDataSource.query(
+      `INSERT INTO "admin_audit_log"
+         ("actor_user_id", "actor_email", "action", "entity_type", "entity_id",
+          "before", "after", "note")
+       VALUES (NULL, $1, $2, 'paypal_dispute', $3, NULL, $4, $5)`,
+      [entry.actorEmail, entry.action, entry.disputeId, JSON.stringify(entry.after), entry.note],
+    );
+  }
+
+  /**
    * Records a recurring sale that was NOT credited because its amount/currency differs
    * from every candidate plan. At most one row per sale id: a replayed event for the
    * same sale must not add a second row (the NOT EXISTS).

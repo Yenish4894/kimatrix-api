@@ -9,6 +9,12 @@ export class PaypalWebhookEventRepository {
   /**
    * Inserts the event row. Returns false when the event id is already known, which is
    * the idempotency guarantee: no row back means another delivery already claimed it.
+   *
+   * One exception: a claim that was never marked processed and is over 5 minutes old is
+   * taken over. That is a process that died mid-dispatch (a deploy restart, OOM) before
+   * it could release the claim; without this, every PayPal retry of that event was
+   * treated as a duplicate and the event was lost for good. Five minutes is far longer
+   * than any dispatch takes, so a claim still being worked on is never stolen.
    */
   async claim(event: {
     eventId: string;
@@ -22,7 +28,9 @@ export class PaypalWebhookEventRepository {
         `INSERT INTO "paypal_webhook_events"
            ("event_id", "event_type", "resource_id", "create_time", "payload")
          VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT ("event_id") DO NOTHING
+         ON CONFLICT ("event_id") DO UPDATE SET "received_at" = now()
+           WHERE "paypal_webhook_events"."processed_at" IS NULL
+             AND "paypal_webhook_events"."received_at" < now() - interval '5 minutes'
          RETURNING "id"`,
         [event.eventId, event.eventType, event.resourceId, event.createTime, event.payload],
       ),

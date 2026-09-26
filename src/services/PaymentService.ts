@@ -4,7 +4,7 @@ import { logger } from "@/utils/logger";
 import { PlanRepository } from "@/repositories/PlanRepository";
 import { PaymentRepository } from "@/repositories/PaymentRepository";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
-import { PaypalService } from "@/services/PaypalService";
+import { PaypalDeclinedError, PaypalService } from "@/services/PaypalService";
 import { PaypalWebhookService } from "@/services/PaypalWebhookService";
 import { SettingsService } from "@/services/SettingsService";
 import { NotificationService } from "@/services/NotificationService";
@@ -258,8 +258,15 @@ export class PaymentService {
     try {
       capture = await this.paypalService.captureOrder(paypalOrderId);
     } catch (err) {
-      // Deliberately left in `capturing`, NOT `failed`: PayPal may well have taken the
-      // money and we simply never heard back. The webhook finalizes it, and it would
+      // PayPal answered with a definite refusal: nothing was charged. Hand the row back
+      // to `pending` so the buyer can choose another funding source and retry now,
+      // instead of being told "already being processed" until the reconcile job runs.
+      if (err instanceof PaypalDeclinedError) {
+        await this.paymentRepository.releaseCaptureClaim(claimed.id);
+        throw err;
+      }
+      // Otherwise deliberately left in `capturing`, NOT `failed`: PayPal may well have
+      // taken the money and we simply never heard back. The webhook finalizes it, and it would
       // skip a row we had marked failed.
       logger.error(
         { err, paypalOrderId, companyId },
@@ -433,7 +440,8 @@ export class PaymentService {
   }
 
   async handleWebhook(headers: Record<string, string>, rawBody: string): Promise<void> {
-    const valid = await this.paypalService.verifyWebhookSignature({
+    // Throws when PayPal cannot give a verdict (controller → 5xx → PayPal retries).
+    const verdict = await this.paypalService.verifyWebhookSignature({
       transmissionId: headers["paypal-transmission-id"] ?? "",
       transmissionTime: headers["paypal-transmission-time"] ?? "",
       certUrl: headers["paypal-cert-url"] ?? "",
@@ -442,7 +450,7 @@ export class PaymentService {
       rawBody,
     });
 
-    if (!valid) {
+    if (verdict === "invalid") {
       logger.warn("PayPal webhook signature verification failed — ignoring event");
       return;
     }
@@ -475,7 +483,10 @@ export class PaymentService {
     const orderId = relatedIds?.["order_id"] as string | undefined;
 
     if (!orderId || typeof orderId !== "string") {
-      logger.warn({ event }, "PayPal webhook: could not extract order ID");
+      logger.warn(
+        { eventId: event["id"], eventType },
+        "PayPal webhook: could not extract order ID",
+      );
       return;
     }
 

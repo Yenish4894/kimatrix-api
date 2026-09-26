@@ -282,6 +282,20 @@ export class PaymentRepository {
   }
 
   /**
+   * Hands a claimed capture back when PayPal definitively refused it (declined card,
+   * restricted account): no money moved, so the buyer may approve again and retry.
+   * Conditional on `capturing`, so it can never undo a row the webhook finalized.
+   */
+  async releaseCaptureClaim(id: string): Promise<boolean> {
+    const result = await AppDataSource.query(
+      `UPDATE "payments" SET "status" = 'pending', "updated_at" = now()
+        WHERE "id" = $1 AND "status" = 'capturing'`,
+      [id],
+    );
+    return affectedRows(result) > 0;
+  }
+
+  /**
    * Locks the payment a PayPal reversal event refers to, by order id or capture id.
    *
    * Raw SQL with `FOR UPDATE` on the single row — no joins, for the same reason as the
@@ -293,11 +307,19 @@ export class PaymentRepository {
    * which is indexed, is tried first whenever PayPal supplies it.
    */
   async findForReversalForUpdate(
-    refs: { orderId: string | null; captureId: string | null },
+    refs: { orderId: string | null; captureId: string | null; saleId?: string | null },
     manager: EntityManager,
   ): Promise<ReversalPaymentRow | null> {
     const columns = `"id", "company_id", "kind", "status", "amount", "currency",
                      "subscription_starts_at", "subscription_ends_at", "paypal_response"`;
+    // A recurring sale (subscription renewal) is found by its own sale id.
+    if (refs.saleId) {
+      const rows = (await manager.query(
+        `SELECT ${columns} FROM "payments" WHERE "paypal_sale_id" = $1 FOR UPDATE`,
+        [refs.saleId],
+      )) as ReversalPaymentRow[];
+      if (rows[0]) return rows[0];
+    }
     if (refs.orderId) {
       const rows = (await manager.query(
         `SELECT ${columns} FROM "payments" WHERE "paypal_order_id" = $1 FOR UPDATE`,

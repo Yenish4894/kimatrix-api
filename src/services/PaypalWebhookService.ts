@@ -8,7 +8,12 @@ import { PaymentRepository } from "@/repositories/PaymentRepository";
 import { PaypalWebhookEventRepository } from "@/repositories/PaypalWebhookEventRepository";
 import type { TransactionRunner } from "@/utils/db";
 import { logger } from "@/utils/logger";
-import { classifyReversal, reversalRefs, type ReversalEventType } from "@/utils/paypalBilling";
+import {
+  classifyReversal,
+  reversalRefs,
+  withoutPayerDetails,
+  type ReversalEventType,
+} from "@/utils/paypalBilling";
 import { NotificationService, type RefundNotice } from "@/services/NotificationService";
 import { refundDisplayAmount } from "@/utils/billingEmails";
 import type { RefundAccessChange } from "@/templates/refundProcessed.template";
@@ -77,7 +82,7 @@ export class PaypalWebhookService {
       eventType,
       resourceId,
       createTime,
-      payload: JSON.stringify(event),
+      payload: JSON.stringify(withoutPayerDetails(event)),
     });
     if (!claimed) {
       logger.info({ eventId, eventType }, "Duplicate webhook — already processed");
@@ -164,9 +169,7 @@ export class PaypalWebhookService {
         return;
       }
 
-      case "PAYMENT.SALE.DENIED":
-      case "PAYMENT.SALE.REFUNDED":
-      case "PAYMENT.SALE.REVERSED": {
+      case "PAYMENT.SALE.DENIED": {
         const billingAgreementId = resource["billing_agreement_id"];
         if (typeof billingAgreementId !== "string") return;
         // Deliberately does NOT revoke access. Renewals are charged a day before the
@@ -182,19 +185,34 @@ export class PaypalWebhookService {
           remote,
           createTime ?? undefined,
         );
-        // A declined renewal. (A refunded/reversed renewal sale sends nothing: this code
-        // does not take access back for those, so there is no change to report.)
-        if (eventType === "PAYMENT.SALE.DENIED") {
-          void this.notificationService.sendRenewalFailed(billingAgreementId);
-        }
+        void this.notificationService.sendRenewalFailed(billingAgreementId);
         return;
       }
+
+      // A renewal that WAS credited has been refunded or charged back. Found by the
+      // sale id stored when it was credited, and reversed exactly like a one-time
+      // capture: a full refund takes back that cycle's window, a partial one is flagged
+      // for a human. These used to be dropped because the refund body carries no
+      // billing_agreement_id, so a refunded renewal kept its access.
+      case "PAYMENT.SALE.REFUNDED":
+      case "PAYMENT.SALE.REVERSED":
+        await this.handleReversal(eventType, resource);
+        return;
 
       // ── Orders-era money going back ───────────────────────────────────────
       case "PAYMENT.CAPTURE.REFUNDED":
       case "PAYMENT.CAPTURE.REVERSED":
       case "PAYMENT.CAPTURE.DENIED":
-        await this.handleCaptureReversal(eventType, resource);
+        await this.handleReversal(eventType, resource);
+        return;
+
+      // A buyer opened (or PayPal settled) a dispute. Recorded for an admin and not
+      // acted on: a dispute is a claim, not a refund. If PayPal decides for the buyer
+      // the money moves as a REFUNDED/REVERSED event, which is handled above.
+      case "CUSTOMER.DISPUTE.CREATED":
+      case "CUSTOMER.DISPUTE.UPDATED":
+      case "CUSTOMER.DISPUTE.RESOLVED":
+        await this.recordDispute(eventType, resource);
         return;
 
       default:
@@ -203,7 +221,8 @@ export class PaypalWebhookService {
   }
 
   /**
-   * A one-time capture was refunded, charged back or denied after we recorded it.
+   * A one-time capture or a credited renewal sale was refunded, charged back or denied
+   * after we recorded it.
    *
    * Previously these fell through to "not handled", so a refunded customer kept the
    * access (and the draw spins) they had been paid back for.
@@ -216,12 +235,12 @@ export class PaypalWebhookService {
    * days a partial refund is worth is a judgement call for a human, and wrongly locking
    * out a paying customer is the worse error.
    */
-  private async handleCaptureReversal(
+  private async handleReversal(
     eventType: ReversalEventType,
     resource: Record<string, unknown>,
   ): Promise<void> {
     const refs = reversalRefs(eventType, resource);
-    if (!refs.orderId && !refs.captureId) {
+    if (!refs.orderId && !refs.captureId && !refs.saleId) {
       logger.warn(
         { eventType, resourceId: resource["id"] },
         "Reversal without a capture reference",
@@ -301,15 +320,15 @@ export class PaypalWebhookService {
         manager,
       );
 
-      // Take back exactly the window this order added. Only an `order` grants access
-      // (a `spin_addon` is withdrawn by the status change alone: spins count only
-      // `captured` payments). Subtracting the window's length rather than resetting to
-      // its start keeps any time bought after it — later orders or renewals stacked
-      // on top by GREATEST(...) + interval.
+      // Take back exactly the window this payment added. An `order` or a
+      // `subscription_cycle` grants access; a `spin_addon` is withdrawn by the status
+      // change alone (spins count only `captured` payments). Subtracting the window's
+      // length rather than resetting to its start keeps any time bought after it —
+      // later orders or renewals stacked on top by GREATEST(...) + interval.
       let access: { before: Date | null; after: Date | null } | null = null;
       if (
         wasCaptured &&
-        payment.kind === "order" &&
+        payment.kind !== "spin_addon" &&
         payment.subscription_starts_at &&
         payment.subscription_ends_at
       ) {
@@ -359,7 +378,7 @@ export class PaypalWebhookService {
         const change: RefundAccessChange =
           payment.kind === "spin_addon"
             ? { type: "spins_removed" }
-            : payment.kind === "order" && access
+            : access
               ? {
                   type: "access_reduced",
                   newEndsAt: access.after ? new Date(access.after).toISOString() : null,
@@ -381,6 +400,37 @@ export class PaypalWebhookService {
     // After commit. Not awaited and cannot throw: the reversal is recorded whatever
     // happens to the email, and PayPal must get its 2xx.
     if (notice) void this.notificationService.sendRefundProcessed(notice);
+  }
+
+  /**
+   * Leaves an admin-visible trail for a dispute. Only ids, amounts and PayPal's codes are
+   * kept: the dispute body also carries the buyer's name, email and messages.
+   */
+  private async recordDispute(eventType: string, resource: Record<string, unknown>): Promise<void> {
+    const disputeId = resource["dispute_id"] ?? resource["id"];
+    if (typeof disputeId !== "string") return;
+    const transactions = Array.isArray(resource["disputed_transactions"])
+      ? (resource["disputed_transactions"] as Record<string, unknown>[])
+      : [];
+    const outcome = resource["dispute_outcome"] as Record<string, unknown> | undefined;
+    const details = {
+      status: resource["status"] ?? null,
+      reason: resource["reason"] ?? null,
+      stage: resource["dispute_life_cycle_stage"] ?? null,
+      amount: resource["dispute_amount"] ?? null,
+      outcome: outcome?.["outcome_code"] ?? null,
+      transactionIds: transactions
+        .map((t) => t?.["seller_transaction_id"])
+        .filter((id): id is string => typeof id === "string"),
+    };
+    await this.auditLogRepository.insertDisputeEntry({
+      actorEmail: SYSTEM_ACTOR_EMAIL,
+      action: "payment.dispute",
+      disputeId: disputeId.slice(0, 64),
+      after: details,
+      note: `${eventType} — review in PayPal; access unchanged`.slice(0, 255),
+    });
+    logger.error({ eventType, disputeId, ...details }, "PayPal dispute — needs a human");
   }
 
   /**
