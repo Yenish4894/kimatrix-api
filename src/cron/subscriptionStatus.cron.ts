@@ -6,6 +6,7 @@ import { AdvisoryLockRepository } from "@/repositories/AdvisoryLockRepository";
 import { CompanyRepository, EXPIRY_NOTICE_KINDS } from "@/repositories/CompanyRepository";
 import { SubscriptionRepository } from "@/repositories/SubscriptionRepository";
 import { EmailService } from "@/services/EmailService";
+import { SubscriptionService } from "@/services/SubscriptionService";
 
 /**
  * Hourly, not daily: a trial ending at 14:00 should not keep showing "active" in the
@@ -37,10 +38,10 @@ export async function reconcileSubscriptionStatuses(): Promise<number> {
       logger.debug("Subscription status reconcile skipped — another instance holds the lock");
       return 0;
     }
-    // Frees the one-live-subscription slot held by rows that can never go live again,
-    // so a customer whose cancelled plan has run out can subscribe again.
-    const retired = await new SubscriptionRepository().retireDeadRows(manager);
-    if (retired > 0) logger.info({ retired }, "Retired ended/abandoned subscription rows");
+    // Frees the one-live-subscription slot held by a cancelled plan whose time has run
+    // out, so that customer can subscribe again.
+    const retired = await new SubscriptionRepository().retireEndedCancellations(manager);
+    if (retired > 0) logger.info({ retired }, "Retired ended cancelled subscriptions");
     return companyRepository.reconcileSubscriptionStatuses(manager);
   });
 }
@@ -127,6 +128,15 @@ export function startSubscriptionStatusCron(): void {
       // A previous tick still running means the table is large enough that overlapping
       // runs would queue behind each other's locks for no benefit; runExclusive skips.
       await runExclusive("subscriptionStatus", async () => {
+        // Outside the locked transaction: it calls PayPal, and holding a connection and
+        // lock across HTTP is what the other jobs avoid. Idempotent, so no lock needed.
+        const expired = await new SubscriptionService()
+          .retireAbandonedApprovals()
+          .catch((err: unknown) => {
+            logger.error({ err }, "Abandoned-approval sweep failed");
+            return 0;
+          });
+        if (expired > 0) logger.info({ expired }, "Expired abandoned subscription approvals");
         const changed = await reconcileSubscriptionStatuses();
         if (changed > 0) {
           logger.info({ changed }, "Subscription status reconcile completed");

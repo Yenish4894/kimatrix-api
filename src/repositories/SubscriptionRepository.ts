@@ -69,31 +69,51 @@ export class SubscriptionRepository {
   }
 
   /**
-   * Moves rows that can never go live again out of the one-live-per-company index, which
-   * they otherwise hold for good:
-   *
-   *  - `pending_cancel` once the paid time is over → `cancelled`. PayPal's CANCELLED is
-   *    kept as pending_cancel on purpose, and nothing ever moved it on, so a customer
-   *    who cancelled could never subscribe again.
-   *  - `pending` older than 3 hours → `expired`. PayPal's approval link is short-lived;
-   *    a buyer who closed the PayPal tab left a row that blocked every retry.
+   * `pending_cancel` once the paid time is over → `cancelled`. PayPal's CANCELLED is kept
+   * as pending_cancel on purpose, and nothing ever moved it on, so it held the
+   * one-live-per-company index for good and a customer who cancelled could never
+   * subscribe again. Safe without asking PayPal: it is already cancelled there.
    *
    * All companies (the hourly cron) or one (subscribe, so it need not wait for the cron).
    */
-  async retireDeadRows(manager: EntityManager, companyId: string | null = null): Promise<number> {
+  async retireEndedCancellations(
+    manager: EntityManager,
+    companyId: string | null = null,
+  ): Promise<number> {
     const result: unknown = await manager.query(
       `UPDATE "subscriptions" s
-          SET "status" = CASE s."status" WHEN 'pending_cancel' THEN 'cancelled' ELSE 'expired' END,
-              "updated_at" = now()
+          SET "status" = 'cancelled', "updated_at" = now()
          FROM "companies" c
         WHERE c."id" = s."company_id"
           AND ($1::uuid IS NULL OR s."company_id" = $1::uuid)
-          AND ((s."status" = 'pending' AND s."created_at" < now() - interval '3 hours')
-            OR (s."status" = 'pending_cancel'
-                AND (c."subscription_expires_at" IS NULL OR c."subscription_expires_at" <= now())))`,
+          AND s."status" = 'pending_cancel'
+          AND (c."subscription_expires_at" IS NULL OR c."subscription_expires_at" <= now())`,
       [companyId],
     );
     return affectedRows(result);
+  }
+
+  /** `pending` rows older than 3 hours: approvals that were probably abandoned. */
+  async findStalePending(
+    companyId: string | null = null,
+  ): Promise<{ id: string; paypal_subscription_id: string | null }[]> {
+    return (await AppDataSource.query(
+      `SELECT "id", "paypal_subscription_id" FROM "subscriptions"
+        WHERE "status" = 'pending'
+          AND "created_at" < now() - interval '3 hours'
+          AND ($1::uuid IS NULL OR "company_id" = $1::uuid)`,
+      [companyId],
+    )) as { id: string; paypal_subscription_id: string | null }[];
+  }
+
+  /** `pending` → `expired`, only if it is still pending. */
+  async expireIfPending(id: string): Promise<boolean> {
+    const result: unknown = await AppDataSource.query(
+      `UPDATE "subscriptions" SET "status" = 'expired', "updated_at" = now()
+        WHERE "id" = $1 AND "status" = 'pending'`,
+      [id],
+    );
+    return affectedRows(result) > 0;
   }
 
   /** PayPal ids of every subscription PayPal may still bill or change, for the daily reconcile. */

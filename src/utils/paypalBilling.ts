@@ -185,3 +185,16 @@ export function classifyReversal(
   if (paid == null || refunded == null || paid <= 0) return "partial";
   return refunded >= paid ? "full" : "partial";
 }
+
+/** True for an https URL on paypal.com or a subdomain of it. */
+export function isPaypalCertUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      (url.hostname === "paypal.com" || url.hostname.endsWith(".paypal.com"))
+    );
+  } catch {
+    return false;
+  }
+}

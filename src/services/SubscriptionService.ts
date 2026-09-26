@@ -117,9 +117,10 @@ export class SubscriptionService {
     //
     // Rows that can never go live again (an ended pending_cancel, an approval abandoned
     // hours ago) are retired first; otherwise they held that index forever.
+    await this.retireAbandonedApprovals(companyId);
     const local = await this.db
       .transaction(async (manager) => {
-        await this.subscriptionRepository.retireDeadRows(manager, companyId);
+        await this.subscriptionRepository.retireEndedCancellations(manager, companyId);
         return this.subscriptionRepository.createPending(companyId, planId, manager);
       })
       .catch((err: unknown) => {
@@ -457,6 +458,36 @@ export class SubscriptionService {
     // if the receipt cannot be queued.
     if (credited) void this.notificationService.sendPaymentReceipt(credited);
     return credited !== null;
+  }
+
+  /**
+   * Expires `pending` rows over 3 hours old whose approval was abandoned, so they stop
+   * blocking a new subscribe. PayPal is asked first: a buyer who DID approve but whose
+   * ACTIVATED webhook is still being retried must not have their paying subscription
+   * expired under them (it would then bill and never be credited). Approved → the
+   * state is applied instead; still APPROVAL_PENDING or unknown to PayPal → expired.
+   * A PayPal error skips the row until the next run.
+   */
+  async retireAbandonedApprovals(companyId: string | null = null): Promise<number> {
+    const stale = await this.subscriptionRepository.findStalePending(companyId);
+    let retired = 0;
+    for (const row of stale) {
+      try {
+        const paypalId = row.paypal_subscription_id;
+        const remote = paypalId ? await this.paypalService.getSubscription(paypalId) : null;
+        if (paypalId && remote && remote.status !== "APPROVAL_PENDING") {
+          await this.applyRemoteState(paypalId, remote);
+          continue;
+        }
+        if (await this.subscriptionRepository.expireIfPending(row.id)) retired++;
+      } catch (err) {
+        logger.warn(
+          { err, subscriptionId: row.id },
+          "Could not check a stale approval; will retry",
+        );
+      }
+    }
+    return retired;
   }
 
   /**

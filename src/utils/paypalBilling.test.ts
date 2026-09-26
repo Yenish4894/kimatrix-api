@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   billingStartTime,
   classifyReversal,
+  isPaypalCertUrl,
   reversalRefs,
   toCents,
   withoutPayerDetails,
@@ -164,5 +165,20 @@ describe("withoutPayerDetails", () => {
   it("leaves an event without a resource alone", () => {
     const event: { id: string; resource?: Record<string, unknown> } = { id: "WH-2" };
     assert.equal(withoutPayerDetails(event), event);
+  });
+});
+
+describe("isPaypalCertUrl", () => {
+  it("accepts PayPal's live and sandbox cert hosts", () => {
+    assert.equal(isPaypalCertUrl("https://api.paypal.com/v1/notifications/certs/CERT-1"), true);
+    assert.equal(isPaypalCertUrl("https://api.sandbox.paypal.com/v1/notifications/certs/C"), true);
+  });
+
+  it("rejects other hosts, look-alikes, http and junk", () => {
+    assert.equal(isPaypalCertUrl("https://evil.com/cert"), false);
+    assert.equal(isPaypalCertUrl("https://paypal.com.evil.com/cert"), false);
+    assert.equal(isPaypalCertUrl("https://evilpaypal.com/cert"), false);
+    assert.equal(isPaypalCertUrl("http://api.paypal.com/cert"), false);
+    assert.equal(isPaypalCertUrl("not a url"), false);
   });
 });

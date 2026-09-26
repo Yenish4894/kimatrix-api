@@ -1,5 +1,6 @@
 import { config } from "@/config/index";
 import { logger } from "@/utils/logger";
+import { isPaypalCertUrl } from "@/utils/paypalBilling";
 import { fetchWithTimeout as fetchWithDeadline } from "@/utils/fetchWithTimeout";
 import { AppError, BadRequestError } from "@/errors/index";
 import type { PaypalOrderView } from "@/utils/paymentReconcile";
@@ -338,6 +339,10 @@ export class PaypalService {
       opts.transmissionSig,
     ];
     if (headers.some((h) => !h)) return "invalid";
+    // PayPal's signing certificate is always served from a paypal.com host. Anything
+    // else is forged; rejecting it here also means a flood of junk requests does not
+    // spend our PayPal API quota on verify calls.
+    if (!isPaypalCertUrl(opts.certUrl)) return "invalid";
     let webhookEvent: unknown;
     try {
       webhookEvent = JSON.parse(opts.rawBody);
