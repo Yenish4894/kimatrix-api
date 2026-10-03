@@ -7,6 +7,33 @@ import type { TransactionRunner } from "@/utils/db";
 import { computeEntitlement } from "@/utils/entitlement";
 import { logger } from "@/utils/logger";
 
+/**
+ * When the comp's draw window opens, i.e. which spins it counts as already used.
+ *
+ * Adjusting the spins of a comp that is still running keeps its window, so a top-up
+ * cannot quietly re-admit the customers who already won. A comp that has lapsed
+ * (`comped_until` passed, though `is_comped` stays true) is over: granting spins again
+ * opens a fresh window. Keeping the old one there subtracted the spins used in the
+ * earlier, finished comp from the new grant.
+ */
+export function compSpinWindowStart(
+  company: {
+    isComped: boolean;
+    compedUntil: Date | null;
+    compDrawSpins: number;
+    compDrawSpinsGrantedAt: Date | null;
+  },
+  drawSpins: number,
+  now: Date,
+): Date | null {
+  if (drawSpins === 0) return null;
+  const compRunning =
+    company.isComped && (company.compedUntil == null || company.compedUntil > now);
+  const keepWindow =
+    compRunning && company.compDrawSpins > 0 && company.compDrawSpinsGrantedAt != null;
+  return keepWindow ? company.compDrawSpinsGrantedAt : now;
+}
+
 /** The admin comp: free access, forever or until a date. */
 export class AdminCompService {
   constructor(
@@ -44,13 +71,9 @@ export class AdminCompService {
 
       // Omitting spins leaves them as they are; revoking the comp revokes them too.
       const drawSpins = params.isComped ? (params.drawSpins ?? company.compDrawSpins ?? 0) : 0;
-      // The draw window opens when spins are first granted and stays put while they
-      // are merely adjusted — otherwise topping up a spin would quietly re-admit the
-      // customers who already won.
-      const keepWindow =
-        company.isComped && company.compDrawSpins > 0 && company.compDrawSpinsGrantedAt != null;
-      const drawSpinsGrantedAt =
-        drawSpins === 0 ? null : keepWindow ? company.compDrawSpinsGrantedAt : new Date();
+      // The draw window opens when spins are first granted and stays put while a running
+      // comp's spins are merely adjusted. See compSpinWindowStart.
+      const drawSpinsGrantedAt = compSpinWindowStart(company, drawSpins, new Date());
 
       await this.companyRepository.setComp(
         {
