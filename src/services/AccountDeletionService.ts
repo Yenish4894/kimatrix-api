@@ -10,7 +10,8 @@ import type { TransactionRunner } from "@/utils/db";
 import { logger } from "@/utils/logger";
 
 /** How long a request sits before it is acted on. */
-export const DELETION_GRACE_DAYS = 30;
+// 7 since 2026-10-03 (was 30), the same week as EXPIRY_RETENTION_DAYS.
+export const DELETION_GRACE_DAYS = 7;
 
 export interface DeletionStatus {
   requested: boolean;

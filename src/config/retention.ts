@@ -6,4 +6,5 @@
  * disagree, either data is deleted earlier than promised or it lingers past what was
  * stated. Neither is discoverable until it has already happened.
  */
-export const EXPIRY_RETENTION_DAYS = 15;
+// 7 since 2026-10-03 (was 15): data is kept a week after access ends, then removed.
+export const EXPIRY_RETENTION_DAYS = 7;

@@ -6,7 +6,7 @@ import { runExclusive } from "@/cron/runTracker";
 import { logger } from "@/utils/logger";
 
 /**
- * Daily, not hourly. The grace period is 30 days, so hour-level precision buys nothing
+ * Daily, not hourly. The grace period is 7 days, so hour-level precision buys nothing
  * and this is the most destructive job in the system — the less often it runs, the
  * fewer chances it has to be wrong.
  *
@@ -20,7 +20,7 @@ const ADVISORY_LOCK_KEY = 4711_2027;
 let task: ScheduledTask | null = null;
 
 /**
- * Purges accounts whose 30-day grace period has elapsed.
+ * Purges accounts whose 7-day grace period (DELETION_GRACE_DAYS) has elapsed.
  *
  * Each company is purged in its own transaction, and a failure on one is logged and
  * skipped rather than aborting the batch — one company with unusual data must not
