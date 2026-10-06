@@ -6,10 +6,12 @@ import {
   type DrawEntry,
   type DrawHistoryRow,
   type DrawPeriod,
+  type FreeDrawPeriod,
 } from "@/repositories/LuckyDrawRepository";
 import { logger } from "@/utils/logger";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
-import { PaymentRepository } from "@/repositories/PaymentRepository";
+import { PaymentRepository, type PaidWindow } from "@/repositories/PaymentRepository";
+import type { Company } from "@/entities/Company";
 import { SettingsService } from "@/services/SettingsService";
 import { computeEntitlement } from "@/utils/entitlement";
 import { trialSpinsFor } from "@/utils/spinAddon";
@@ -38,6 +40,17 @@ export interface DrawStatus {
   canBuySpins: boolean;
   history: DrawHistoryRow[];
 }
+
+/**
+ * Whether, and into what, the company can buy spins right now. The ONE place this is
+ * decided: GET /company/draws (canBuySpins) and the purchase itself both use it, so the
+ * button can never offer what the server then refuses.
+ */
+export type SpinPurchaseOption =
+  | { mode: "paid"; window: PaidWindow }
+  | { mode: "free"; period: FreeDrawPeriod }
+  | { mode: "none"; reason: "inactive" | "non_usd_plan" }
+  | { mode: "none"; reason: "spins_left"; remaining: number };
 
 export interface SpinResult {
   drawId: string;
@@ -77,38 +90,66 @@ export class LuckyDrawService {
    */
   private async trialSpins(companyId: string, manager: EntityManager): Promise<number> {
     const company = await this.companyRepository.findById(companyId, manager);
-    if (!company) return 0;
+    return company ? this.trialSpinsOf(company, manager) : 0;
+  }
+
+  private async trialSpinsOf(company: Company, manager: EntityManager): Promise<number> {
     return trialSpinsFor(
       computeEntitlement(company, new Date()).isTrial,
       await this.settingsService.getTrialDrawSpins(manager),
     );
   }
 
-  /** Mirrors PaymentService.initiateSpinPurchase, so the button never offers a refusal. */
-  private async canBuySpins(
+  /**
+   * See SpinPurchaseOption. During a paid plan, always (unchanged). Otherwise on a
+   * running comp or trial, but only once every free spin is used, so nobody pays for
+   * spins they already have for free.
+   *
+   * @param known  the company and its periods when the caller already loaded them.
+   */
+  async spinPurchaseOption(
     companyId: string,
-    totalRemaining: number,
     manager: EntityManager,
-  ): Promise<boolean> {
-    if (await this.paymentRepository.findCurrentPaidWindow(companyId)) return true;
-    if (totalRemaining > 0) return false;
-    const company = await this.companyRepository.findById(companyId, manager);
-    if (!company) return false;
+    known: { company?: Company | null; periods?: DrawPeriod[] } = {},
+  ): Promise<SpinPurchaseOption> {
     const now = new Date();
-    const entitlement = computeEntitlement(company, now);
-    if (!entitlement.hasAccess) return false;
-    const compRunning =
-      company.isComped && (company.compedUntil == null || company.compedUntil > now);
-    return compRunning || entitlement.isTrial;
+    const company =
+      known.company !== undefined
+        ? known.company
+        : await this.companyRepository.findById(companyId, manager);
+    if (!company || !computeEntitlement(company, now).hasAccess) {
+      return { mode: "none", reason: "inactive" };
+    }
+    const window = await this.paymentRepository.findCurrentPaidWindow(companyId, manager);
+    if (window) {
+      // Spins are priced in USD; a plan billed in another currency cannot add them.
+      return window.plan_currency === "USD"
+        ? { mode: "paid", window }
+        : { mode: "none", reason: "non_usd_plan" };
+    }
+    const period = await this.repository.freeDrawPeriod(companyId, now, manager);
+    if (!period) return { mode: "none", reason: "inactive" };
+    const periods =
+      known.periods ??
+      (await this.repository.activePeriods(
+        companyId,
+        now,
+        manager,
+        await this.trialSpinsOf(company, manager),
+      ));
+    const remaining = periods.reduce((n, p) => n + Math.max(0, p.spins - p.used), 0);
+    if (remaining > 0) return { mode: "none", reason: "spins_left", remaining };
+    return { mode: "free", period };
   }
 
   async getStatus(companyId: string): Promise<DrawStatus> {
     return AppDataSource.transaction(async (manager) => {
+      const company = await this.companyRepository.findById(companyId, manager);
       const periods = await this.repository.activePeriods(
         companyId,
         new Date(),
         manager,
-        await this.trialSpins(companyId, manager),
+        company ? await this.trialSpinsOf(company, manager) : 0,
       );
       const withPools = await Promise.all(
         periods.map(async (p): Promise<DrawPeriodStatus> => {
@@ -129,7 +170,8 @@ export class LuckyDrawService {
       return {
         periods: withPools,
         totalRemaining,
-        canBuySpins: await this.canBuySpins(companyId, totalRemaining, manager),
+        canBuySpins:
+          (await this.spinPurchaseOption(companyId, manager, { company, periods })).mode !== "none",
         history: await this.repository.history(companyId, manager),
       };
     });

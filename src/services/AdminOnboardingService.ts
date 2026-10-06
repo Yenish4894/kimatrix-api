@@ -122,7 +122,9 @@ export class AdminOnboardingService {
           compReason: input.compReason.trim(),
           compGrantedBy: { id: actor.id } as never,
           compDrawSpins: input.compDrawSpins ?? 0,
-          compDrawSpinsGrantedAt: (input.compDrawSpins ?? 0) > 0 ? now : null,
+          // Every comp has a draw window, even with 0 spins: spins the company buys on
+          // it join that window (see compSpinWindowStart).
+          compDrawSpinsGrantedAt: now,
         },
         manager,
       );

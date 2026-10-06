@@ -99,6 +99,14 @@ const APPEND_REVERSAL_SQL = `COALESCE("paypal_response", '{}'::jsonb)
         || jsonb_build_object('reversals',
              COALESCE("paypal_response"->'reversals', '[]'::jsonb) || $2::jsonb)`;
 
+/** The paid plan window running now, which a paid spin add-on joins. */
+export interface PaidWindow {
+  plan_id: string;
+  starts_at: Date;
+  ends_at: Date;
+  plan_currency: string;
+}
+
 export class PaymentRepository {
   private getRepo(manager?: EntityManager): Repository<Payment> {
     return manager ? manager.getRepository(Payment) : AppDataSource.getRepository(Payment);
@@ -443,12 +451,15 @@ export class PaymentRepository {
    */
   async findCurrentPaidWindow(
     companyId: string,
-  ): Promise<{ plan_id: string; starts_at: Date; ends_at: Date } | undefined> {
-    const [current] = (await AppDataSource.query(
+    manager?: EntityManager,
+  ): Promise<PaidWindow | undefined> {
+    const [current] = (await (manager ?? AppDataSource.manager).query(
       `SELECT p."plan_id" AS plan_id,
               p."subscription_starts_at" AS starts_at,
-              p."subscription_ends_at" AS ends_at
+              p."subscription_ends_at" AS ends_at,
+              pl."currency" AS plan_currency
          FROM "payments" p
+         JOIN "plans" pl ON pl."id" = p."plan_id"
         WHERE p."company_id" = $1
           AND p."status" = 'captured'
           AND p."kind" IN ('order', 'subscription_cycle')
@@ -457,7 +468,7 @@ export class PaymentRepository {
         ORDER BY p."subscription_starts_at" DESC
         LIMIT 1`,
       [companyId],
-    )) as { plan_id: string; starts_at: Date; ends_at: Date }[];
+    )) as PaidWindow[];
     return current;
   }
 

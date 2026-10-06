@@ -52,6 +52,54 @@ export function maskMobile(mobile: string): string {
 }
 
 /**
+ * The company's running trial and comp periods, each keyed as its draws are recorded:
+ * `comp:<window start ms>` / `trial:<trial start ms>`. Both may run at once (a company
+ * comped mid-trial). $1 = company id, $2 = now. `rank` orders comp before trial, as
+ * computeEntitlement does.
+ */
+const FREE_PERIODS_SQL = `
+  SELECT 'comp:' || floor(extract(epoch FROM c."comp_draw_spins_granted_at") * 1000)::bigint
+           AS period_key,
+         'comp'::text AS source, 1 AS rank,
+         c."comp_draw_spins_granted_at" AS period_start, c."comped_until" AS period_end
+    FROM "companies" c
+   WHERE c."id" = $1 AND c."deactivated_at" IS NULL
+     AND c."is_comped" = true
+     AND c."comp_draw_spins_granted_at" IS NOT NULL
+     AND (c."comped_until" IS NULL OR c."comped_until" > $2)
+  UNION ALL
+  SELECT 'trial:' || floor(extract(epoch FROM c."trial_started_at") * 1000)::bigint,
+         'trial', 2, c."trial_started_at", c."trial_ends_at"
+    FROM "companies" c
+   WHERE c."id" = $1 AND c."deactivated_at" IS NULL
+     AND c."trial_started_at" IS NOT NULL
+     AND c."trial_started_at" <= $2
+     AND c."trial_ends_at" > $2`;
+
+export interface FreeDrawPeriod {
+  periodKey: string;
+  source: "comp" | "trial";
+  periodStart: Date;
+  periodEnd: Date | null;
+}
+
+interface FreeDrawPeriodRow {
+  period_key: string;
+  source: "comp" | "trial";
+  period_start: Date;
+  period_end: Date | null;
+}
+
+function toFreeDrawPeriod(r: FreeDrawPeriodRow): FreeDrawPeriod {
+  return {
+    periodKey: r.period_key,
+    source: r.source,
+    periodStart: new Date(r.period_start),
+    periodEnd: r.period_end ? new Date(r.period_end) : null,
+  };
+}
+
+/**
  * The purchases that are in the pool for a period: this company's, submitted inside
  * the window, and not belonging to anyone who has already won in it. Shared by the
  * count and the pick so the two can never disagree about who is eligible — if they
@@ -66,7 +114,9 @@ const ELIGIBLE_WHERE = `
   AND ($3::timestamptz IS NULL OR p."submitted_at" < $3)
   AND p."customer_id" NOT IN (
     SELECT d."winner_customer_id" FROM "lucky_draws" d
-     WHERE d."company_id" = $1 AND d."period_key" = $4
+     WHERE d."company_id" = $1
+       -- A period and its bought pool ("buy:" + key) are one period for winners.
+       AND regexp_replace(d."period_key", '^buy:', '') = regexp_replace($4::text, '^buy:', '')
        -- Required since winners became nullable (erased customers): one NULL in a
        -- NOT IN list makes the whole predicate NULL, and nobody would be eligible.
        AND d."winner_customer_id" IS NOT NULL
@@ -80,81 +130,60 @@ const ELIGIBLE_WHERE = `
 export class LuckyDrawRepository {
   /**
    * Serialises spins for one company. Without it, two clicks (or two tabs) could both
-   * read "1 spin remaining" and both spend it. The unique index on winners would stop
-   * the same customer winning twice, but not a spin being used twice.
+   * read "1 spin remaining" and both spend it. The unique index on winners
+   * (uq_lucky_draws_one_win_per_base_period, which spans a period and its bought pool)
+   * would stop the same customer winning twice, but not a spin being used twice.
    */
   async lockCompany(companyId: string, manager: EntityManager): Promise<void> {
     await manager.query(`SELECT "id" FROM "companies" WHERE "id" = $1 FOR UPDATE`, [companyId]);
   }
 
   /**
-   * The free period (comp, else trial) a spin bought right now joins, with its key in
-   * exactly the form `activePeriods` builds it. Undefined when neither is running. A
-   * comp ranks first, as in computeEntitlement. Computed in SQL, not JS, so the key's
-   * millisecond rounding can never differ from the draws already recorded under it.
+   * The free period (comp, else trial) a spin bought right now is bought for, keyed
+   * exactly as `activePeriods` keys it. Undefined when neither is running. A comp ranks
+   * first, as in computeEntitlement. Computed in SQL, not JS, so the key's millisecond
+   * rounding can never differ from the draws already recorded under it.
    */
   async freeDrawPeriod(
     companyId: string,
     now: Date,
     manager: EntityManager,
-  ): Promise<
-    | { periodKey: string; source: "comp" | "trial"; periodStart: Date; periodEnd: Date | null }
-    | undefined
-  > {
+  ): Promise<FreeDrawPeriod | undefined> {
     const rows = (await manager.query(
-      `SELECT * FROM (
-         SELECT 'comp:' || floor(extract(epoch FROM c."comp_draw_spins_granted_at") * 1000)::bigint
-                  AS period_key,
-                'comp'::text AS source, 1 AS rank,
-                c."comp_draw_spins_granted_at" AS period_start, c."comped_until" AS period_end
-           FROM "companies" c
-          WHERE c."id" = $1 AND c."deactivated_at" IS NULL
-            AND c."is_comped" = true
-            AND c."comp_draw_spins_granted_at" IS NOT NULL
-            AND (c."comped_until" IS NULL OR c."comped_until" > $2)
-         UNION ALL
-         SELECT 'trial:' || floor(extract(epoch FROM c."trial_started_at") * 1000)::bigint,
-                'trial', 2, c."trial_started_at", c."trial_ends_at"
-           FROM "companies" c
-          WHERE c."id" = $1 AND c."deactivated_at" IS NULL
-            AND c."trial_started_at" IS NOT NULL
-            AND c."trial_started_at" <= $2
-            AND c."trial_ends_at" > $2
-       ) f ORDER BY f.rank LIMIT 1`,
+      `SELECT * FROM (${FREE_PERIODS_SQL}) f ORDER BY f.rank LIMIT 1`,
       [companyId, now],
-    )) as {
-      period_key: string;
-      source: "comp" | "trial";
-      period_start: Date;
-      period_end: Date | null;
-    }[];
-    const r = rows[0];
-    if (!r) return undefined;
-    return {
-      periodKey: r.period_key,
-      source: r.source,
-      periodStart: new Date(r.period_start),
-      periodEnd: r.period_end ? new Date(r.period_end) : null,
-    };
+    )) as FreeDrawPeriodRow[];
+    return rows[0] ? toFreeDrawPeriod(rows[0]) : undefined;
   }
 
   /**
-   * Gives a running comp a draw window if it has none (a comp granted with 0 spins
-   * before 2026-10-06 never got one), so spins bought on it have a period to join.
+   * Whether the trial or comp period named by `periodKey` is still running. Used at
+   * capture: a trial purchase must not be refused just because a comp was granted
+   * while the buyer was on PayPal (the comp would outrank it in `freeDrawPeriod`).
    */
-  async anchorCompDrawWindow(companyId: string, now: Date, manager: EntityManager): Promise<void> {
-    await manager.query(
-      `UPDATE "companies" SET "comp_draw_spins_granted_at" = $2
-        WHERE "id" = $1
-          AND "is_comped" = true
-          AND "comp_draw_spins_granted_at" IS NULL
-          AND ("comped_until" IS NULL OR "comped_until" > $2)`,
-      [companyId, now],
-    );
+  async freeDrawPeriodOpen(
+    companyId: string,
+    periodKey: string,
+    now: Date,
+    manager: EntityManager,
+  ): Promise<boolean> {
+    const rows = (await manager.query(
+      `SELECT 1 FROM (${FREE_PERIODS_SQL}) f WHERE f.period_key = $3`,
+      [companyId, now, periodKey],
+    )) as unknown[];
+    return rows.length > 0;
   }
 
   /**
    * Windows that are open right now and include spins, soonest-ending first.
+   *
+   * Spins bought on a trial or comp are their OWN pool (`buy:<period key>`), next to the
+   * period's free spins rather than added to them. Mixed into one count, a later drop in
+   * the free spins (the admin lowering the trial setting, or the company paying or being
+   * comped mid-trial, which zeroes $3) ate the paid ones first. Separate, the paid spins
+   * are counted only against draws made from them. Within one window the free pool sorts
+   * first, so free spins are always used before paid ones. ELIGIBLE_WHERE treats the two
+   * as one period for winners: nobody wins twice in a trial or comp.
    *
    * @param trialSpins  Free spins for the company's running trial, or 0. The caller
    *   decides — it knows whether the trial is what grants access right now (a company
@@ -167,8 +196,9 @@ export class LuckyDrawRepository {
     trialSpins = 0,
   ): Promise<DrawPeriod[]> {
     const rows = (await manager.query(
-      `WITH bought AS (
-         -- Spins bought on a trial or comp, pooled by the period they were bought for.
+      `WITH free AS (${FREE_PERIODS_SQL}),
+       bought AS (
+         -- Captured spins bought on a trial or comp, by the period they were bought for.
          SELECT b."draw_period_key", sum(b."draw_spins")::int AS spins
            FROM "payments" b
           WHERE b."company_id" = $1
@@ -186,63 +216,41 @@ export class LuckyDrawRepository {
                 (array_agg(p."id" ORDER BY p."captured_at", p."id"))[1] AS payment_id,
                 p."subscription_starts_at"    AS period_start,
                 p."subscription_ends_at"      AS period_end,
-                sum(p."draw_spins")::int      AS spins
+                sum(p."draw_spins")::int      AS spins,
+                0                             AS pool_order
            FROM "payments" p
           WHERE p."company_id" = $1
             AND p."status" = 'captured'
             AND p."draw_spins" > 0
-            -- Plan-less add-ons belong to a trial/comp period (the branches below).
+            -- Plan-less add-ons belong to a trial/comp period (the bought pools below).
             AND p."draw_period_key" IS NULL
             AND p."subscription_starts_at" <= $2
             AND p."subscription_ends_at" > $2
           GROUP BY p."subscription_starts_at", p."subscription_ends_at"
          UNION ALL
-         SELECT k.period_key,
-                'comp'::text,
-                NULL::uuid,
-                c."comp_draw_spins_granted_at",
-                c."comped_until",
-                c."comp_draw_spins" + COALESCE(b.spins, 0)
-           FROM "companies" c
-           CROSS JOIN LATERAL (
-             SELECT 'comp:' || floor(extract(epoch FROM c."comp_draw_spins_granted_at") * 1000)::bigint
-                    AS period_key) k
-           LEFT JOIN bought b ON b."draw_period_key" = k.period_key
-          WHERE c."id" = $1
-            AND c."is_comped" = true
-            AND c."deactivated_at" IS NULL
-            AND c."comp_draw_spins" + COALESCE(b.spins, 0) > 0
-            AND c."comp_draw_spins_granted_at" IS NOT NULL
-            AND (c."comped_until" IS NULL OR c."comped_until" > $2)
+         -- The comp's free spins.
+         SELECT f.period_key, 'comp', NULL::uuid, f.period_start, f.period_end,
+                c."comp_draw_spins", 0
+           FROM free f JOIN "companies" c ON c."id" = $1
+          WHERE f.source = 'comp' AND c."comp_draw_spins" > 0
          UNION ALL
-         -- The running trial, with the admin's live spin setting passed in as $3.
+         -- The running trial's free spins, with the admin's live setting passed in as $3.
          -- Keyed on the trial's start so a later trial (after an admin reset) gets its
          -- own count rather than inheriting spins used in an earlier one.
-         -- Spins bought during the trial are added to it; they stay usable until the
-         -- trial ends even if the company is comped or pays meanwhile ($3 is then 0).
-         SELECT k.period_key,
-                'trial'::text,
-                NULL::uuid,
-                c."trial_started_at",
-                c."trial_ends_at",
-                $3::int + COALESCE(b.spins, 0)
-           FROM "companies" c
-           CROSS JOIN LATERAL (
-             SELECT 'trial:' || floor(extract(epoch FROM c."trial_started_at") * 1000)::bigint
-                    AS period_key) k
-           LEFT JOIN bought b ON b."draw_period_key" = k.period_key
-          WHERE c."id" = $1
-            AND $3::int + COALESCE(b.spins, 0) > 0
-            AND c."deactivated_at" IS NULL
-            AND c."trial_started_at" IS NOT NULL
-            AND c."trial_started_at" <= $2
-            AND c."trial_ends_at" > $2
+         SELECT f.period_key, 'trial', NULL::uuid, f.period_start, f.period_end, $3::int, 0
+           FROM free f
+          WHERE f.source = 'trial' AND $3::int > 0
+         UNION ALL
+         -- Spins bought on that trial / comp: usable while it runs, extensions included.
+         SELECT 'buy:' || f.period_key, f.source, NULL::uuid, f.period_start, f.period_end,
+                b.spins, 1
+           FROM free f JOIN bought b ON b."draw_period_key" = f.period_key
        )
        SELECT pr.*,
               (SELECT count(*)::int FROM "lucky_draws" d
                 WHERE d."company_id" = $1 AND d."period_key" = pr.period_key) AS used
          FROM periods pr
-        ORDER BY pr.period_end ASC NULLS LAST`,
+        ORDER BY pr.period_end ASC NULLS LAST, pr.pool_order ASC`,
       [companyId, now, trialSpins],
     )) as {
       period_key: string;
