@@ -9,6 +9,7 @@ import {
 } from "@/repositories/LuckyDrawRepository";
 import { logger } from "@/utils/logger";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
+import { PaymentRepository } from "@/repositories/PaymentRepository";
 import { SettingsService } from "@/services/SettingsService";
 import { computeEntitlement } from "@/utils/entitlement";
 import { trialSpinsFor } from "@/utils/spinAddon";
@@ -30,6 +31,11 @@ export interface DrawPeriodStatus {
 export interface DrawStatus {
   periods: DrawPeriodStatus[];
   totalRemaining: number;
+  /**
+   * Whether the company may buy spins right now: always while a paid plan runs; on a
+   * trial or admin-granted free access, only once every free spin is used.
+   */
+  canBuySpins: boolean;
   history: DrawHistoryRow[];
 }
 
@@ -55,6 +61,7 @@ export class LuckyDrawService {
     private readonly repository = new LuckyDrawRepository(),
     private readonly companyRepository = new CompanyRepository(),
     private readonly settingsService = new SettingsService(),
+    private readonly paymentRepository = new PaymentRepository(),
   ) {}
 
   /**
@@ -75,6 +82,24 @@ export class LuckyDrawService {
       computeEntitlement(company, new Date()).isTrial,
       await this.settingsService.getTrialDrawSpins(manager),
     );
+  }
+
+  /** Mirrors PaymentService.initiateSpinPurchase, so the button never offers a refusal. */
+  private async canBuySpins(
+    companyId: string,
+    totalRemaining: number,
+    manager: EntityManager,
+  ): Promise<boolean> {
+    if (await this.paymentRepository.findCurrentPaidWindow(companyId)) return true;
+    if (totalRemaining > 0) return false;
+    const company = await this.companyRepository.findById(companyId, manager);
+    if (!company) return false;
+    const now = new Date();
+    const entitlement = computeEntitlement(company, now);
+    if (!entitlement.hasAccess) return false;
+    const compRunning =
+      company.isComped && (company.compedUntil == null || company.compedUntil > now);
+    return compRunning || entitlement.isTrial;
   }
 
   async getStatus(companyId: string): Promise<DrawStatus> {
@@ -100,9 +125,11 @@ export class LuckyDrawService {
           };
         }),
       );
+      const totalRemaining = withPools.reduce((n, p) => n + p.remaining, 0);
       return {
         periods: withPools,
-        totalRemaining: withPools.reduce((n, p) => n + p.remaining, 0),
+        totalRemaining,
+        canBuySpins: await this.canBuySpins(companyId, totalRemaining, manager),
         history: await this.repository.history(companyId, manager),
       };
     });

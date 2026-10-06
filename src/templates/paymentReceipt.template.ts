@@ -29,7 +29,7 @@ function whatHappened(d: PaymentReceiptEmailData): string {
         ? `This was your automatic plan renewal. Your plan now runs until ${end}.`
         : "This was your automatic plan renewal.";
     case "spin_addon":
-      return "Your spins have been added to the lucky draw for your current plan period.";
+      return "Your spins have been added to the lucky draw for your current period.";
     default:
       return end ? `Your plan now runs until ${end}.` : "Your plan is active.";
   }

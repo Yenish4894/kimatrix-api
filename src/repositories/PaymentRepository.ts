@@ -107,9 +107,11 @@ export class PaymentRepository {
   async create(
     data: {
       companyId: string;
-      planId: string;
+      /** Null only with `drawPeriodKey`: a spin add-on bought on a trial or comp. */
+      planId: string | null;
       paypalOrderId: string;
       status: PaymentStatus;
+      drawPeriodKey?: string | null;
       amount: number;
       currency: string;
       drawSpins?: number;
@@ -123,7 +125,8 @@ export class PaymentRepository {
     return repo.save(
       repo.create({
         company: { id: data.companyId } as never,
-        plan: { id: data.planId } as never,
+        plan: data.planId ? ({ id: data.planId } as never) : null,
+        drawPeriodKey: data.drawPeriodKey ?? null,
         paypalOrderId: data.paypalOrderId,
         status: data.status,
         kind: data.kind ?? "order",

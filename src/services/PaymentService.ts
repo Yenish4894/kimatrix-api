@@ -3,6 +3,7 @@ import { config } from "@/config/index";
 import { logger } from "@/utils/logger";
 import { PlanRepository } from "@/repositories/PlanRepository";
 import { PaymentRepository } from "@/repositories/PaymentRepository";
+import { LuckyDrawRepository } from "@/repositories/LuckyDrawRepository";
 import { CompanyRepository } from "@/repositories/CompanyRepository";
 import { PaypalDeclinedError, PaypalService } from "@/services/PaypalService";
 import { PaypalWebhookService } from "@/services/PaypalWebhookService";
@@ -12,7 +13,8 @@ import { BadRequestError, ConflictError, NotFoundError } from "@/errors/index";
 import type { Plan } from "@/entities/Plan";
 import { computeEntitlement } from "@/utils/entitlement";
 import type { TransactionRunner } from "@/utils/db";
-import { orderAmount, spinWindowClosed } from "@/utils/spinAddon";
+import { orderAmount, spinWindowClosed, trialSpinsFor } from "@/utils/spinAddon";
+import type { Payment } from "@/entities/Payment";
 import {
   decideStuckCapture,
   RECONCILE_AFTER_MINUTES,
@@ -55,6 +57,12 @@ export interface CapturePaymentResult {
   subscriptionEndsAt: Date;
 }
 
+/** An order always has a plan; only a trial/comp spin add-on may lack one. */
+function planOf(payment: Payment): Plan {
+  if (!payment.plan) throw new Error(`Payment ${payment.id} has no plan`);
+  return payment.plan;
+}
+
 export class PaymentService {
   constructor(
     private readonly planRepository = new PlanRepository(),
@@ -65,6 +73,7 @@ export class PaymentService {
     private readonly settingsService = new SettingsService(),
     private readonly notificationService = new NotificationService(),
     private readonly db: TransactionRunner = AppDataSource,
+    private readonly luckyDrawRepository = new LuckyDrawRepository(),
   ) {}
 
   async getPlans(): Promise<PlanDto[]> {
@@ -156,9 +165,13 @@ export class PaymentService {
     // spanned both plans.
     const current = await this.paymentRepository.findCurrentPaidWindow(companyId);
     const company = await this.companyRepository.findById(companyId);
-    if (!company || !current || !computeEntitlement(company, new Date()).hasAccess) {
-      throw BadRequestError("You can add spins only while a paid plan is active.");
+    if (!company || !computeEntitlement(company, new Date()).hasAccess) {
+      throw BadRequestError(
+        "You can add spins only while your plan, trial or free access is active.",
+      );
     }
+    // No paid plan running: a trial or admin-granted free access (since 2026-10-06).
+    if (!current) return this.initiateFreePeriodSpinPurchase(companyId, spinQuantity);
     const plan = await this.planRepository.findById(current.plan_id);
     if (!plan) throw NotFoundError("Current plan not found.");
     if (plan.currency !== "USD") {
@@ -191,6 +204,77 @@ export class PaymentService {
       drawSpins: spinQuantity,
       subscriptionStartsAt: new Date(current.starts_at),
       subscriptionEndsAt: new Date(current.ends_at),
+    });
+    return { paymentId: payment.id, paypalOrderId: order.id, approvalUrl: approvalLink.href };
+  }
+
+  /**
+   * Spins bought on a free trial or on admin-granted free access. They join that
+   * period's own draw (by `draw_period_key`) and last until it ends, extensions
+   * included. Offered only once the free spins are used up, so nobody pays for spins
+   * they already have for free.
+   */
+  private async initiateFreePeriodSpinPurchase(
+    companyId: string,
+    spinQuantity: number,
+  ): Promise<InitiatePaymentResult> {
+    const now = new Date();
+    const found = await this.db.transaction(async (manager) => {
+      await this.luckyDrawRepository.anchorCompDrawWindow(companyId, now, manager);
+      const period = await this.luckyDrawRepository.freeDrawPeriod(companyId, now, manager);
+      if (!period) return null;
+      const company = await this.companyRepository.findById(companyId, manager);
+      const trialSpins = trialSpinsFor(
+        company ? computeEntitlement(company, now).isTrial : false,
+        await this.settingsService.getTrialDrawSpins(manager),
+      );
+      const periods = await this.luckyDrawRepository.activePeriods(
+        companyId,
+        now,
+        manager,
+        trialSpins,
+      );
+      const remaining = periods.reduce((n, p) => n + Math.max(0, p.spins - p.used), 0);
+      return { period, remaining };
+    });
+    if (!found) {
+      throw BadRequestError(
+        "You can add spins only while your plan, trial or free access is active.",
+      );
+    }
+    if (found.remaining > 0) {
+      throw BadRequestError(
+        `You still have ${found.remaining} free spin${found.remaining === 1 ? "" : "s"}. You can buy more once they're used.`,
+      );
+    }
+
+    const spinAddonPriceUsd = await this.settingsService.getSpinAddonPriceUsd();
+    const amount = orderAmount(0, spinQuantity, spinAddonPriceUsd);
+    const order = await this.paypalService.createOrder({
+      amount,
+      currency: "USD",
+      referenceId: `${companyId}:spin-addon:${spinQuantity}`,
+      returnUrl: `${config.FRONTEND_BASE_URL}/company/billing/success`,
+      cancelUrl: `${config.FRONTEND_BASE_URL}/company/billing/cancel`,
+    });
+    const approvalLink = order.links.find((l) => l.rel === "approve");
+    if (!approvalLink)
+      throw BadRequestError("Spin purchase could not be initiated. Please try again.");
+
+    const payment = await this.paymentRepository.create({
+      companyId,
+      planId: null,
+      drawPeriodKey: found.period.periodKey,
+      paypalOrderId: order.id,
+      status: "pending",
+      kind: "spin_addon",
+      amount,
+      currency: "USD",
+      drawSpins: spinQuantity,
+      // The period's dates as of now, for the receipt. The draw itself follows the
+      // live trial/comp end through the key, so an extension needs no update here.
+      subscriptionStartsAt: found.period.periodStart,
+      subscriptionEndsAt: found.period.periodEnd,
     });
     return { paymentId: payment.id, paypalOrderId: order.id, approvalUrl: approvalLink.href };
   }
@@ -241,7 +325,24 @@ export class PaymentService {
     // page until that window closed, capturing would charge them for spins that can no
     // longer be used — so stop here, before any money moves. An order never approved
     // is simply abandoned at PayPal.
-    if (claimed.kind === "spin_addon" && spinWindowClosed(claimed.subscriptionEndsAt, new Date())) {
+    // Spins bought on a trial or comp: the period must still be the live one. Its end
+    // can move (an admin extension), so the stored date is not the test; the key is.
+    if (claimed.kind === "spin_addon" && claimed.drawPeriodKey) {
+      const live = await this.db.transaction((manager) =>
+        this.luckyDrawRepository.freeDrawPeriod(companyId, new Date(), manager),
+      );
+      if (live?.periodKey !== claimed.drawPeriodKey) {
+        await this.paymentRepository.updateStatus(claimed.id, "failed", {
+          reason: "free_period_ended_before_capture",
+        });
+        throw BadRequestError(
+          "Your trial or free access ended before this payment went through, so you have not been charged.",
+        );
+      }
+    } else if (
+      claimed.kind === "spin_addon" &&
+      spinWindowClosed(claimed.subscriptionEndsAt, new Date())
+    ) {
       await this.paymentRepository.updateStatus(claimed.id, "failed", {
         reason: "plan_window_ended_before_capture",
       });
@@ -335,8 +436,8 @@ export class PaymentService {
           : await this.companyRepository.extendSubscription(
               {
                 companyId: payment.company.id,
-                planId: payment.plan.id,
-                durationDays: payment.plan.durationDays,
+                planId: planOf(payment).id,
+                durationDays: planOf(payment).durationDays,
                 now,
               },
               manager,

@@ -39,9 +39,20 @@ export class Payment extends BaseEntity {
   @JoinColumn({ name: "company_id" })
   company!: Relation<Company>;
 
-  @ManyToOne(() => Plan, (plan) => plan.payments, { nullable: false, onDelete: "RESTRICT" })
+  /**
+   * Null only for a spin add-on bought on a trial or comp, which has no plan and names
+   * its draw period in `drawPeriodKey` instead (DB CHECK enforces the pairing).
+   */
+  @ManyToOne(() => Plan, (plan) => plan.payments, { nullable: true, onDelete: "RESTRICT" })
   @JoinColumn({ name: "plan_id" })
-  plan!: Relation<Plan>;
+  plan!: Relation<Plan> | null;
+
+  /**
+   * For a spin add-on bought on a trial or comp: the draw period it adds spins to, the
+   * same key `lucky_draws.period_key` uses (`trial:<ms>` / `comp:<ms>`). Null otherwise.
+   */
+  @Column({ name: "draw_period_key", type: "varchar", length: 64, nullable: true })
+  drawPeriodKey!: string | null;
 
   @Index({ unique: true })
   /**
