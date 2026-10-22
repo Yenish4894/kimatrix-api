@@ -34,6 +34,9 @@ export const bulkEmailLimiter = rateLimit({
   }),
   // Fail open, like every other limiter: a Redis blip must not turn into a 500.
   passOnStoreError: true,
+  // Only sends that went out count. A send refused by validation (a bad pasted address)
+  // used to count too, so five honest retries locked the admin out for an hour.
+  skipFailedRequests: true,
   keyGenerator: (req: Request) => `user:${req.user?.id ?? "unknown"}`,
   message: {
     success: false,
