@@ -32,3 +32,17 @@ export function hasVerifiedSuperAdminToken(
     return false;
   }
 }
+
+/**
+ * Paths the global per-IP cap does not apply to.
+ *
+ * The public QR form (`/api/qr/...`) is exempt because its customers are often behind
+ * one shared address: mobile carriers in South Africa and India put many phones behind
+ * carrier-grade NAT, and a shop's Wi-Fi does the same. 100 requests per 15 minutes per
+ * address is a few dozen customers at a busy forecourt. Those routes carry their own
+ * limits instead: `qrResolveLimiter` on the lookup, and per-phone, per-minute, per-day
+ * and per-address caps on submit, plus the cooldown and one-use invoice numbers.
+ */
+export function isGlobalLimitExemptPath(path: string): boolean {
+  return path === "/api/payments/paypal/webhook" || path.startsWith("/api/qr/");
+}

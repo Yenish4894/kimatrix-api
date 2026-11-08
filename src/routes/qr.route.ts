@@ -6,6 +6,7 @@ import {
   qrSubmitPerDayLimiter,
   qrSubmitPerDevicePerDayLimiter,
   qrSubmitPerMinuteLimiter,
+  qrResolveLimiter,
 } from "@/middleware/rateLimit";
 
 const router = Router();
@@ -13,6 +14,7 @@ const controller = new QrController();
 
 router.get(
   "/:qrToken",
+  qrResolveLimiter,
   validateRequest(qrTokenParamSchema, ValidationTarget.PARAMS),
   controller.resolve,
 );

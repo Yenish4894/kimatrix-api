@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import jwt from "jsonwebtoken";
 import { JWT_AUDIENCE, JWT_ISSUER, signAccessJwt } from "@/utils/accessToken";
-import { hasVerifiedSuperAdminToken } from "@/utils/rateLimitBypass";
+import { hasVerifiedSuperAdminToken, isGlobalLimitExemptPath } from "@/utils/rateLimitBypass";
 
 const SECRET = "test-secret-that-is-at-least-32-characters-long";
 const admin = { sub: "admin-1", userType: "super_admin" as const };
@@ -70,5 +70,28 @@ describe("hasVerifiedSuperAdminToken", () => {
 
   it("never exempts anything when no secret is configured", () => {
     assert.equal(hasVerifiedSuperAdminToken(bearer(signAccessJwt(admin, SECRET, "1h")), ""), false);
+  });
+});
+
+describe("isGlobalLimitExemptPath", () => {
+  it("exempts the public QR routes, which carry their own limits", () => {
+    assert.equal(isGlobalLimitExemptPath("/api/qr/AbCdEf123456"), true);
+    assert.equal(isGlobalLimitExemptPath("/api/qr/AbCdEf123456/submit"), true);
+  });
+
+  it("exempts the PayPal webhook", () => {
+    assert.equal(isGlobalLimitExemptPath("/api/payments/paypal/webhook"), true);
+  });
+
+  it("keeps everything else under the global cap", () => {
+    for (const p of [
+      "/api/auth/login",
+      "/api/company/draws",
+      "/api/qr",
+      "/api/qrx/abc",
+      "/api/payments/paypal/capture-order",
+    ]) {
+      assert.equal(isGlobalLimitExemptPath(p), false, p);
+    }
   });
 });

@@ -4,7 +4,7 @@ import RedisStore from "rate-limit-redis";
 import { getRedisClient } from "@/config/redis.client";
 import { config } from "@/config/index";
 import { logger } from "@/utils/logger";
-import { hasVerifiedSuperAdminToken } from "@/utils/rateLimitBypass";
+import { hasVerifiedSuperAdminToken, isGlobalLimitExemptPath } from "@/utils/rateLimitBypass";
 
 const ONE_MIN = 60 * 1000;
 const ONE_DAY = 24 * 60 * 60 * 1000;
@@ -151,7 +151,10 @@ function mobilePart(req: Request): string {
 export const qrSubmitPerDevicePerDayLimiter = buildLimiter({
   prefix: "qr_submit_device_day",
   windowMs: ONE_DAY,
-  limit: 30,
+  // Keyed by address, not by phone, and many phones can share one address (carrier NAT,
+  // shop Wi-Fi). 30 would have turned away the 31st real customer of a busy shop on a
+  // shared address; 200 still stops one device flooding a merchant.
+  limit: 200,
   keyGenerator: (req: Request) => `${ipKey(clientIp(req))}:${qrTokenPart(req)}:device_day`,
   message: "Too many submissions from this device today. Please try again tomorrow.",
 });
@@ -182,7 +185,7 @@ export const globalApiLimiter = buildLimiter({
    * through the companies screens hit it in normal use, and a ban/unban came back 429.
    */
   skip: (req) =>
-    req.path === "/api/payments/paypal/webhook" ||
+    isGlobalLimitExemptPath(req.path) ||
     hasVerifiedSuperAdminToken(req.headers.authorization, config.JWT_SECRET),
 });
 
@@ -259,6 +262,18 @@ export const qrSubmitPerDayLimiter = buildLimiter({
   limit: config.QR_SUBMIT_RATE_PER_DAY,
   keyGenerator: (req) => qrSubmitKey(req, "d"),
   message: "You have reached today's submission limit for this number. Please try again tomorrow.",
+});
+
+// The public QR page lookup (`GET /api/qr/:qrToken`), exempt from the global cap for the
+// reason given at isGlobalLimitExemptPath. Per address and per QR code: 300 per 15
+// minutes is far above a queue of customers on one shared address and far below a
+// script walking the endpoint.
+export const qrResolveLimiter = buildLimiter({
+  prefix: "qr_resolve",
+  windowMs: ONE_MIN * 15,
+  limit: 300,
+  keyGenerator: (req: Request) => `${ipKey(clientIp(req))}:${qrTokenPart(req)}`,
+  message: "Too many requests. Please slow down and try again shortly.",
 });
 
 // The public visitor counter. Unauthenticated, so it is capped per IP (IPv6 by /64) to

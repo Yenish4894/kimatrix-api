@@ -29,7 +29,8 @@ Every rule here is already enforced somewhere in `src/`. New code keeps them; a 
 
 - Secrets come from `src/config/index.ts`, which throws at boot when a required variable is missing. No fallback defaults for secrets.
 - Trial abuse: emails are canonicalised (dots and plus-tags stripped for Gmail) and hashed with `TRIAL_IDENTITY_PEPPER` into `trial_identities`; one trial per email and per phone, ever.
-- Invoice numbers are unique per company; QR submissions have per-minute, per-day and per-device limits plus a resubmit cooldown.
+- Invoice numbers are unique per company; QR submissions have per-minute, per-day and per-address limits plus a resubmit cooldown.
+- The global per-IP cap (100 per 15 min) skips `/api/qr/*` and the PayPal webhook (`isGlobalLimitExemptPath` in `utils/rateLimitBypass.ts`). QR customers often share one address (carrier NAT, shop Wi-Fi), so those routes use their own limits: `qrResolveLimiter` (300 per 15 min per address and QR code) and a per-address submit cap of 200 a day per QR code (raised from 30 on 2026-11-08).
 - Bulk email: 5 sends per admin per hour (`bulkEmailLimiter`, `skipFailedRequests: true`), only to opted-in companies, every send logged in `bulk_email_logs`.
 - PayPal webhooks are signature-verified against `PAYPAL_WEBHOOK_ID` and recorded in `paypal_webhook_events` before processing (idempotent).
 - Logs never contain emails, phone numbers, tokens or payloads. Log ids and domains.
