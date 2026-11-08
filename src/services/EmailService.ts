@@ -98,12 +98,18 @@ export class EmailService {
     to: string;
     subject: string;
     body: string;
+    /** Decides the footer: a company owner, or an address with no account. */
+    audience: "company" | "external";
     attachment?: { path: string; filename: string };
   }): Promise<void> {
     // Rendered through the same branded shell as every other email. This used to hand
     // the mailer bare <p> tags, so a platform-wide announcement arrived unstyled while
     // a password reset from the same system looked polished.
-    const rendered = renderBulkAnnouncementEmail({ subject: input.subject, body: input.body });
+    const rendered = renderBulkAnnouncementEmail({
+      subject: input.subject,
+      body: input.body,
+      audience: input.audience,
+    });
     const job = await emailQueue.add(
       "generic",
       buildBulkEmailJob({

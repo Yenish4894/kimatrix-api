@@ -1,4 +1,5 @@
 import { config } from "@/config/index";
+import { SELLER } from "@/pdf/invoice";
 import { escapeHtml } from "@/utils/html";
 
 interface BulkAnnouncementTemplateData {
@@ -6,6 +7,14 @@ interface BulkAnnouncementTemplateData {
   subject: string;
   /** Free text the admin typed. Blank lines separate paragraphs. */
   body: string;
+  /**
+   * Who this copy is for, which decides the footer. `company`: the owner of a business
+   * account, who can switch announcements off in their settings. `external`: an address
+   * the admin typed in, belonging to someone with no account. Telling them "your
+   * business has an account" and pointing them at settings they cannot reach was untrue
+   * and gave them no way to opt out.
+   */
+  audience?: "company" | "external";
 }
 
 interface RenderedEmail {
@@ -48,7 +57,27 @@ export function renderBulkAnnouncementEmail(data: BulkAnnouncementTemplateData):
     )
     .join("");
 
-  const text = [data.body.trim(), "", `— ${brand}`, site].join("\n");
+  const audience = data.audience ?? "company";
+  // The public contact address (the one on invoices), not the sending address, which
+  // can be a no-reply box.
+  const contact = SELLER.email;
+  const optOutHtml =
+    audience === "company"
+      ? `You're receiving this because your business has an account with ${escapeHtml(brand)}.
+                  To stop receiving announcements, turn off promotional email in
+                  <a href="${site}/company/settings" style="color:#0d9488;text-decoration:none;">your settings</a>.`
+      : `You're receiving this because ${escapeHtml(brand)} chose to send this message to you.
+                  If you'd rather not hear from us, reply to this email${
+                    contact
+                      ? ` or write to <a href="mailto:${escapeHtml(contact)}" style="color:#0d9488;text-decoration:none;">${escapeHtml(contact)}</a>`
+                      : ""
+                  }.`;
+  const optOutText =
+    audience === "company"
+      ? `You're receiving this because your business has an account with ${brand}. To stop, turn off promotional email in your settings: ${site}/company/settings`
+      : `You're receiving this because ${brand} chose to send this message to you. If you'd rather not hear from us, reply to this email${contact ? ` or write to ${contact}` : ""}.`;
+
+  const text = [data.body.trim(), "", `— ${brand}`, site, "", optOutText].join("\n");
 
   const html = `<!doctype html>
 <html lang="en">
@@ -102,9 +131,7 @@ export function renderBulkAnnouncementEmail(data: BulkAnnouncementTemplateData):
                   <a href="${site}" style="color:#0d9488;text-decoration:none;">${escapeHtml(site.replace(/^https?:\/\//, ""))}</a>
                 </p>
                 <p style="margin:0;">
-                  You're receiving this because your business has an account with ${escapeHtml(brand)}.
-                  To stop receiving announcements, turn off promotional email in
-                  <a href="${site}/company/settings" style="color:#0d9488;text-decoration:none;">your settings</a>.
+                  ${optOutHtml}
                 </p>
               </td>
             </tr>

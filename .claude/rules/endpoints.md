@@ -738,6 +738,10 @@ Send one message to any set of companies and/or arbitrary addresses.
   address cannot stop the batch.
 - Body is escaped before it reaches HTML (`utils/html.ts`) and rendered through the
   branded `bulkAnnouncement` template.
+- The footer depends on the recipient (2026-11-08): company owners get "your business has an
+  account" with a link to their settings; typed-in extra addresses get "KIMates chose to send this
+  to you" with reply / `info@kimates.com` as the way to opt out. An address that is both gets
+  the company footer.
 
 Returns `{ recipientCount, logId }`. `recipientCount` is what was actually queued, not
 what was requested.

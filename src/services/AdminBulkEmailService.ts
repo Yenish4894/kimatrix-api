@@ -51,14 +51,19 @@ export class AdminBulkEmailService {
 
     // One address may be both a company owner and typed into the extra box. Sending
     // the same announcement twice to the same person looks like a broken system, so
-    // the address decides identity, not which list it came from.
+    // the address decides identity, not which list it came from. Owners come first, so
+    // such an address keeps the company footer (it really does have an account).
     const seen = new Set<string>();
-    const recipients: string[] = [];
-    for (const address of [...companies.map((c) => c.owner.email), ...extraEmails]) {
+    const recipients: { to: string; audience: "company" | "external" }[] = [];
+    const candidates = [
+      ...companies.map((c) => ({ address: c.owner.email, audience: "company" as const })),
+      ...extraEmails.map((address) => ({ address, audience: "external" as const })),
+    ];
+    for (const { address, audience } of candidates) {
       const key = address.trim().toLowerCase();
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      recipients.push(address.trim());
+      recipients.push({ to: address.trim(), audience });
     }
 
     if (!recipients.length) {
@@ -79,9 +84,10 @@ export class AdminBulkEmailService {
     // Enqueue one job per recipient so individual failures don't block others. Every
     // job points at the same file on disk rather than carrying a copy of it.
     await Promise.all(
-      recipients.map((to) =>
+      recipients.map(({ to, audience }) =>
         this.emailService.enqueueBulkEmail({
           to,
+          audience,
           subject: subject.trim(),
           body: body.trim(),
           ...(attachment
