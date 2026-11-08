@@ -1,11 +1,11 @@
 # 🎯 KIMates Backend API
 
-> B2B SaaS QR-based customer purchase tracking platform for fuel stations and shops, focused on South Africa and India.
+> B2B SaaS QR-based customer purchase tracking platform for fuel stations and shops, available worldwide.
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.3-blue)](https://www.typescriptlang.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-22-green)](https://nodejs.org/)
 [![Express](https://img.shields.io/badge/Express-4.x-lightgrey)](https://expressjs.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue)](https://www.postgresql.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-blue)](https://www.postgresql.org/)
 [![TypeORM](https://img.shields.io/badge/TypeORM-0.3-orange)](https://typeorm.io/)
 [![License](https://img.shields.io/badge/license-MIT-green)]()
 
@@ -30,12 +30,12 @@
 
 ## 🌟 Overview
 
-**KIMates** is a comprehensive B2B SaaS platform that enables fuel stations and shops, focused on South Africa and India, to track customer purchases through QR codes. Customers scan a QR code, submit purchase details without requiring authentication, and businesses gain insights through a powerful dashboard. Customer amounts use the company country’s local currency; subscription payments are in USD.
+**KIMates** is a comprehensive B2B SaaS platform that enables fuel stations and shops anywhere to track customer purchases through QR codes. Customers scan a QR code, submit purchase details without requiring authentication, and businesses gain insights through a powerful dashboard. Customer amounts use the company country’s local currency; subscription payments are in USD.
 
 ### Key Value Propositions
 
 - **Zero Friction**: Customers submit purchases without login
-- **PayPal Integration**: Self-service subscription with automatic activation
+- **Self-service**: Email-verified signup starts a trial; plans and lucky-draw spins are paid through PayPal
 - **Real-time Tracking**: Live customer data and top spender rankings
 - **Mobile-First**: Optimized for 3G networks and budget Android devices
 - **Secure**: JWT authentication, refresh token rotation
@@ -53,11 +53,18 @@
 
 ### 💳 Payment Integration
 
-- **PayPal Sandbox/Live** support
-- Self-service subscription (7/15/21/30 day plans)
-- Automatic activation on payment capture
-- Subscription stacking (renew early, keep remaining days)
-- Webhook backup (captures payment if user closes browser)
+- **PayPal Sandbox/Live** support (production currently runs in sandbox)
+- Admin-managed, versioned plans (7/15/21/30 days at launch), paid once through the PayPal Orders API
+- PayPal Subscriptions (auto-renew) is integrated but switched off for customers since 2026-09-27
+- Lucky-draw spin add-ons, priced by the admin
+- Access granted on payment capture; renewing early stacks onto the remaining days
+- Signed webhooks as a backup (captures a payment if the buyer closes the browser)
+
+### 🎁 Trial, Lucky Draw and Retention
+
+- Trial starts when the signup's email is verified; one trial per email and phone, ever
+- Lucky draw: spins from the trial setting, admin comps or purchases; the server picks the winner
+- Data is erased 7 days after a plan expires or an account is closed
 
 ### 📱 QR Submission
 
@@ -77,10 +84,10 @@
 
 ### 👑 Super Admin Panel
 
-- Platform-wide statistics
-- Company management (activate/deactivate)
-- Three-state company status (Pending/Active/Deactivated)
-- Manual activation override (for promotions)
+- Platform-wide statistics, per currency, and service health (SMTP, PayPal, database, Redis, queue)
+- Company management: ban/unban with a reason, complimentary access, trial extension, onboarding by invite, deletion
+- Versioned plans, trial length and lucky-draw pricing
+- Bulk email with attachments, and a full audit log
 
 ---
 
@@ -88,13 +95,13 @@
 
 | Layer           | Technology                                  |
 | --------------- | ------------------------------------------- |
-| **Runtime**     | Node.js 22.x + TypeScript 5.3 (ES2022, ESM) |
+| **Runtime**     | Node.js 22.x + TypeScript 5.9 (ES2022, ESM) |
 | **Framework**   | Express 4.x                                 |
-| **Database**    | PostgreSQL 16 + TypeORM 0.3.x               |
+| **Database**    | PostgreSQL 18 + TypeORM 0.3.x               |
 | **Validation**  | Joi                                         |
 | **Auth**        | JWT (jsonwebtoken) + bcryptjs               |
 | **Cache/Queue** | Redis + BullMQ + ioredis                    |
-| **Email**       | Nodemailer (SMTP)                           |
+| **Email**       | Nodemailer over SMTP (Resend in production) |
 | **Payment**     | PayPal REST API v2                          |
 | **Security**    | Helmet, CORS, express-rate-limit            |
 | **Logging**     | Pino (structured JSON logs)                 |
@@ -136,13 +143,12 @@ Database (PostgreSQL)
 Before you begin, ensure you have the following installed:
 
 - **Node.js** >= 22.0.0 ([Download](https://nodejs.org/))
-- **PostgreSQL** >= 16.0 ([Download](https://www.postgresql.org/download/))
+- **PostgreSQL** >= 16.0, production runs 18 ([Download](https://www.postgresql.org/download/))
 - **Redis** >= 7.0 ([Download](https://redis.io/download))
 - **npm** >= 10.0.0 (comes with Node.js)
 
 Optional but recommended:
 
-- **Docker** + **Docker Compose** (for PostgreSQL + Redis)
 - **pgAdmin** or **DBeaver** (database GUI)
 
 ---
@@ -152,8 +158,8 @@ Optional but recommended:
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/kimates-api.git
-cd kimates-api
+git clone https://github.com/Yenish4894/kimatrix-api.git
+cd kimatrix-api
 ```
 
 ### 2. Install Dependencies
@@ -347,7 +353,7 @@ Authorization: Bearer <access_token>
 | `/admin/companies/:id/activate`   | PATCH  | Super Admin | Activate company                                   |
 | `/admin/companies/:id/deactivate` | PATCH  | Super Admin | Deactivate company                                 |
 
-For detailed request/response schemas, see [`FRONTEND_API_GUIDE.md`](FRONTEND_API_GUIDE.md).
+For detailed request/response shapes, see [`.claude/rules/endpoints.md`](.claude/rules/endpoints.md).
 
 ---
 
@@ -526,15 +532,15 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 For issues and questions:
 
-- 📧 Email: support@kimates.com
-- 🐛 Issues: [GitHub Issues](https://github.com/yourusername/kimates-api/issues)
-- 📚 Docs: [API Documentation](FRONTEND_API_GUIDE.md)
+- 📧 Email: info@kimates.com
+- 🐛 Issues: [GitHub Issues](https://github.com/Yenish4894/kimatrix-api/issues)
+- 📚 Docs: [`CLAUDE.md`](CLAUDE.md) and [`.claude/rules/`](.claude/rules) (endpoints, schema, flows, decisions)
 
 ---
 
 ## 🙏 Acknowledgments
 
-- Built for fuel stations and shops, focused on South Africa and India
+- Built for fuel stations and shops worldwide
 - Designed for low-bandwidth, mobile-first environments
 - Inspired by the need for simple, effective customer tracking
 
