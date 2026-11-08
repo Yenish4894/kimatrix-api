@@ -234,8 +234,6 @@ isolatescope-*.json
 .husky/_/
 
 # ─── AI / Dev Tooling ───────────────────────
-CLAUDE.md
-AGENTS.md
 GIT_SETUP_SUMMARY.md
 SETUP.md
 FRONTEND_API_GUIDE.md
@@ -243,7 +241,7 @@ FRONTEND_FLOWS.md
 PAYPAL_WEBHOOK_SETUP.md
 verify-security.sh
 verify-security.ps1
-.claude/
+.claude/settings.local.json
 
 # ─── Misc ───────────────────────────────────
 # Backup files
