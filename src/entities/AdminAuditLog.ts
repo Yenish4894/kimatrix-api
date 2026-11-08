@@ -57,7 +57,7 @@ export type AuditAction = (typeof AUDIT_ACTIONS)[number];
  *
  * Scoped deliberately narrowly to plan and settings changes rather than trying to be a
  * general audit system — pricing is where "who set this, and when?" actually gets
- * asked. `be-decisions.md` flags the absence of any audit table as a known gap; this
+ * asked. `.claude/rules/decisions.md` flags the absence of any audit table as a known gap; this
  * closes it for the highest-value case without committing to logging everything.
  *
  * `actor` is nullable only so deleting a user cannot destroy the trail. `actorEmail`

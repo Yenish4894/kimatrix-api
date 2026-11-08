@@ -92,7 +92,7 @@ export const purchaseIdParamSchema = Joi.object({
 
 /**
  * `format` only. No pagination: a bulk export is deliberately exempt (see
- * be-endpoints.md), because a customer taking their data must get all of it, and
+ * .claude/rules/endpoints.md), because a customer taking their data must get all of it, and
  * paginating would turn "download and leave" into a scripted loop.
  */
 export const exportQuerySchema = Joi.object({

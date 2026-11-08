@@ -15,7 +15,7 @@ import { MigrationInterface, QueryRunner } from "typeorm";
  *    and platform currency without a deploy. Keys are CHECK-constrained so a typo
  *    can't create a dead setting that silently reads back as "unset".
  *
- * 3. `admin_audit_log` — append-only record of plan/pricing changes. `be-decisions.md`
+ * 3. `admin_audit_log` — append-only record of plan/pricing changes. `.claude/rules/decisions.md`
  *    flags the absence of any audit table as a known gap; this closes it where it
  *    matters most.
  *

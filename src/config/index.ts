@@ -56,7 +56,7 @@ export const config = {
   // Server-side pepper for the trial identity registry (utils/identity.ts). Without
   // it the stored digests are brute-forceable back to real phone numbers and emails,
   // so `validateConfig` treats it as required in production and refuses to boot on a
-  // default. Rotating it orphans every existing claim — see be-decisions.md.
+  // default. Rotating it orphans every existing claim — see .claude/rules/decisions.md.
   TRIAL_IDENTITY_PEPPER: process.env["TRIAL_IDENTITY_PEPPER"] ?? "",
 
   // Fallback free-trial length, used only to seed `app_settings` and if that table
